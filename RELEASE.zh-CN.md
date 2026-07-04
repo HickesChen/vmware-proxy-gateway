@@ -13,17 +13,19 @@
    python3 tools/validate_scenarios.py
    ```
 
-4. 提交修改并推送 `main`。
-5. 创建并推送版本 tag：
+4. 也可以直接使用发布脚本：
 
    ```bash
-   git tag -a v$(cat VERSION) -m "Release v$(cat VERSION)"
-   git push origin v$(cat VERSION)
+   tools/release.sh        # patch，例如 0.1.3 -> 0.1.4
+   tools/release.sh minor  # 0.1.3 -> 0.2.0
+   tools/release.sh major  # 0.1.3 -> 1.0.0
+   tools/release.sh --version 1.2.3
    ```
 
-   GitHub Actions 会自动构建发布 zip，并把它挂到 GitHub Release。
+   脚本会更新 `VERSION`、运行验证、提交、打 tag、推送 `main` 和 tag。
+   GitHub Actions 随后会自动构建发布 zip，并把它挂到 GitHub Release。
 
-6. 在全新 Ubuntu 虚拟机安装并验证：
+5. 在全新 Ubuntu 虚拟机安装并验证：
 
    ```bash
    sudo ./install.sh
@@ -31,7 +33,7 @@
    vm-proxy-gateway status
    ```
 
-7. 确认卸载清理：
+6. 确认卸载清理：
 
    ```bash
    sudo ./uninstall.sh

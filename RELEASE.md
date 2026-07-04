@@ -13,18 +13,20 @@
    python3 tools/validate_scenarios.py
    ```
 
-4. Commit the changes and push `main`.
-5. Create and push a version tag:
+4. Or use the release helper:
 
    ```bash
-   git tag -a v$(cat VERSION) -m "Release v$(cat VERSION)"
-   git push origin v$(cat VERSION)
+   tools/release.sh        # patch, for example 0.1.3 -> 0.1.4
+   tools/release.sh minor  # 0.1.3 -> 0.2.0
+   tools/release.sh major  # 0.1.3 -> 1.0.0
+   tools/release.sh --version 1.2.3
    ```
 
-   GitHub Actions will build the release zip and attach it to the GitHub
-   Release automatically.
+   The helper updates `VERSION`, validates, commits, tags, pushes `main`, and
+   pushes the tag. GitHub Actions then builds the release zip and attaches it to
+   the GitHub Release automatically.
 
-6. Install on a fresh Ubuntu VM and verify:
+5. Install on a fresh Ubuntu VM and verify:
 
    ```bash
    sudo ./install.sh
@@ -32,7 +34,7 @@
    vm-proxy-gateway status
    ```
 
-7. Confirm uninstall cleanup:
+6. Confirm uninstall cleanup:
 
    ```bash
    sudo ./uninstall.sh

@@ -43,31 +43,22 @@ git push origin v0.1.3
 以后不要复制出一个新的项目文件夹继续开发。推荐流程是：
 
 1. 继续在同一个 Git 仓库里修改代码。
-2. 修改 `VERSION`，例如从 `0.1.3` 改为 `0.1.4`。
-3. 更新 `CHANGELOG.md` 和 `CHANGELOG.zh-CN.md`。
-4. 运行验证命令。
-5. 提交代码。
-6. 打 tag。
-7. 推送代码和 tag。
-8. 等待 GitHub Actions 自动创建 Release 和 zip 附件。
+2. 更新 `CHANGELOG.md` 和 `CHANGELOG.zh-CN.md`。
+3. 运行发布脚本。
+4. 等待 GitHub Actions 自动创建 Release 和 zip 附件。
 
 示例：
 
 ```bash
-echo "0.1.4" > VERSION
-# 修改 CHANGELOG.md 和 CHANGELOG.zh-CN.md
-
-python3 -m py_compile app/vm_proxy_gateway.py app/vm_proxy_gateway_gui.py tools/validate_scenarios.py
-bash -n install.sh
-bash -n uninstall.sh
-python3 tools/validate_scenarios.py
-
-git add .
-git commit -m "Release v0.1.4"
-git tag -a v0.1.4 -m "Release v0.1.4"
-git push origin main
-git push origin v0.1.4
+tools/release.sh        # patch，例如 0.1.3 -> 0.1.4
+tools/release.sh minor  # 0.1.3 -> 0.2.0
+tools/release.sh major  # 0.1.3 -> 1.0.0
+tools/release.sh --version 1.2.3
+tools/release.sh --dry-run
 ```
+
+脚本会自动更新 `VERSION`、运行验证、提交、打 tag、推送 `main` 和 tag。
+如果只想在本地生成提交和 tag，不立刻推送，可以使用 `--no-push`。
 
 如果需要在本地临时生成 zip 测试包，可以在父目录运行：
 

@@ -89,13 +89,26 @@ if git ls-remote --exit-code --tags origin "${tag}" >/dev/null 2>&1; then
   die "Tag ${tag} already exists on origin."
 fi
 
-if [[ -n "$(git status --porcelain)" ]]; then
-  die "Working tree is not clean. Commit or stash current changes first."
+upstream="$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)"
+if [[ -n "${upstream}" ]]; then
+  git fetch --quiet
+  local_head="$(git rev-parse HEAD)"
+  remote_head="$(git rev-parse "${upstream}")"
+  merge_base="$(git merge-base HEAD "${upstream}")"
+  if [[ "${local_head}" != "${remote_head}" && "${local_head}" != "${merge_base}" ]]; then
+    die "Local branch and ${upstream} have diverged. Pull/rebase before releasing."
+  fi
+  if [[ "${local_head}" == "${merge_base}" && "${local_head}" != "${remote_head}" ]]; then
+    die "Remote ${upstream} has commits that are not local. Pull before releasing."
+  fi
 fi
 
 echo "Current version: ${current}"
 echo "Next version:    ${next}"
 echo "Tag:             ${tag}"
+if [[ -n "$(git status --porcelain)" ]]; then
+  echo "Pending changes will be included in the release commit."
+fi
 
 if [[ "${dry_run}" == "1" ]]; then
   echo "Dry run only. No files, commits, or tags were changed."
@@ -110,7 +123,7 @@ bash -n uninstall.sh
 python3 tools/validate_scenarios.py
 find . -type d -name __pycache__ -prune -exec rm -rf {} +
 
-git add VERSION
+git add -A
 git commit -m "Release ${tag}"
 git tag -a "${tag}" -m "Release ${tag}"
 

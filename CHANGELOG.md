@@ -2,6 +2,17 @@
 
 [简体中文](CHANGELOG.zh-CN.md)
 
+## 0.1.5
+
+- Hardened runtime configuration for domain proxy hosts, invalid proxy ports,
+  custom bypass domain normalization, active-service restarts, stale TUN/DNS
+  cleanup, UDP blocking, and IPv4-only DNS behavior.
+- Hardened installation when sing-box already exists outside `/usr/local/bin`
+  and added sing-box verification.
+- Hardened release automation for dirty release worktrees, remote divergence,
+  release asset replacement, and explicit release workflow dependencies.
+- Expanded scenario validation from 9 to 10 checks.
+
 ## 0.1.4
 
 - Added an orange-yellow active tray icon so users can distinguish proxy on/off

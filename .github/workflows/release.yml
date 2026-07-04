@@ -16,7 +16,7 @@ jobs:
       - name: Validate
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-tk python3-pil
+          sudo apt-get install -y python3-tk python3-pil rsync zip
           python3 -m py_compile app/vm_proxy_gateway.py app/vm_proxy_gateway_gui.py tools/validate_scenarios.py
           bash -n install.sh
           bash -n uninstall.sh
@@ -38,6 +38,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" "$archive" \
-            --title "VMware Proxy Gateway $GITHUB_REF_NAME" \
-            --notes "Automated release for $GITHUB_REF_NAME."
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "$archive" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "$archive" \
+              --title "VMware Proxy Gateway $GITHUB_REF_NAME" \
+              --notes "Automated release for $GITHUB_REF_NAME."
+          fi

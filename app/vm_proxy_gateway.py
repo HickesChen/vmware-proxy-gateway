@@ -49,6 +49,7 @@ DEFAULT_BYPASS_DOMAINS = [
     ".lan",
     ".home",
 ]
+DEFAULT_DNS_STRATEGY = "ipv4_only"
 PRESET_BYPASS_DOMAINS = {
     "bypass_system_packages": [
         ".ubuntu.com",
@@ -185,12 +186,38 @@ def domain_suffix(host: str) -> str | None:
     return "." + host
 
 
+def normalize_bypass_domain(value: str) -> str | None:
+    value = value.strip().lower().rstrip(".")
+    if not value:
+        return None
+    if "://" in value:
+        host = host_from_url(value)
+        value = host or ""
+    if not value or value.startswith("#"):
+        return None
+    if value.startswith("*."):
+        value = "." + value[2:]
+    if value.startswith("."):
+        suffix = domain_suffix(value[1:])
+        return suffix if suffix else None
+    suffix = domain_suffix(value)
+    return suffix[1:] if suffix else value
+
+
 def host_from_url(value: str) -> str | None:
     value = value.strip()
     if not value or value.startswith("#"):
         return None
     parsed = urlparse(value if "://" in value else "http://" + value)
     return parsed.hostname
+
+
+def ip_cidr_for_host(host: str) -> str | None:
+    try:
+        ip = ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        return None
+    return f"{ip}/{ip.max_prefixlen}"
 
 
 def get_apt_source_domains(apt_dir: Path = APT_DIR) -> list[str]:
@@ -289,7 +316,12 @@ def normalize_config(raw: dict[str, Any]) -> dict[str, Any]:
     if not host:
         raise GatewayError("Proxy host is empty and default gateway could not be detected.")
 
-    port = int(raw.get("proxy_port") or DEFAULT_PORT)
+    try:
+        port = int(raw.get("proxy_port") or DEFAULT_PORT)
+    except (TypeError, ValueError) as exc:
+        raise GatewayError("proxy_port must be a number.") from exc
+    if port <= 0 or port > 65535:
+        raise GatewayError("proxy_port must be between 1 and 65535.")
     protocol = str(raw.get("proxy_protocol") or "auto").lower()
     if protocol not in {"auto", "socks5", "http"}:
         raise GatewayError("proxy_protocol must be auto, socks5, or http.")
@@ -305,7 +337,9 @@ def normalize_config(raw: dict[str, Any]) -> dict[str, Any]:
     gateway = get_default_gateway()
     if gateway:
         bypass_cidrs.append(f"{gateway}/32")
-    bypass_cidrs.append(f"{host}/32")
+    host_cidr = ip_cidr_for_host(host)
+    if host_cidr:
+        bypass_cidrs.append(host_cidr)
     bypass_cidrs.extend(str(x).strip() for x in raw.get("bypass_cidrs", []) if str(x).strip())
 
     validated_cidrs: list[str] = []
@@ -321,7 +355,10 @@ def normalize_config(raw: dict[str, Any]) -> dict[str, Any]:
             bypass_domains.extend(domains)
     if raw.get("bypass_system_packages", PRESET_BYPASS_DEFAULTS["bypass_system_packages"]):
         bypass_domains.extend(get_apt_source_domains())
-    bypass_domains.extend(str(x).strip() for x in raw.get("bypass_domains", []) if str(x).strip())
+    for item in raw.get("bypass_domains", []):
+        domain = normalize_bypass_domain(str(item))
+        if domain:
+            bypass_domains.append(domain)
     local_dns = get_system_dns_server()
 
     return {
@@ -329,9 +366,10 @@ def normalize_config(raw: dict[str, Any]) -> dict[str, Any]:
         "proxy_port": port,
         "proxy_protocol": protocol,
         "local_dns": local_dns,
+        "dns_strategy": str(raw.get("dns_strategy") or DEFAULT_DNS_STRATEGY),
         "apt_source_domains": get_apt_source_domains(),
         "bypass_cidrs": sorted(set(validated_cidrs)),
-        "bypass_domains": sorted(set(bypass_domains)),
+        "bypass_domains": sorted(set(normalize_bypass_domain(str(domain)) or str(domain) for domain in bypass_domains)),
         "block_udp_when_unsupported": bool(raw.get("block_udp_when_unsupported", False)),
         "bypass_system_packages": bool(raw.get("bypass_system_packages", PRESET_BYPASS_DEFAULTS["bypass_system_packages"])),
         "bypass_container_registries": bool(raw.get("bypass_container_registries", PRESET_BYPASS_DEFAULTS["bypass_container_registries"])),
@@ -361,10 +399,13 @@ def build_sing_box_config(config: dict[str, Any]) -> dict[str, Any]:
     ]
     if config.get("bypass_processes"):
         route_rules.insert(1, {"process_name": config["bypass_processes"], "outbound": "direct"})
+    if config.get("block_udp_when_unsupported"):
+        route_rules.insert(1, {"network": "udp", "outbound": "block"})
 
     return {
         "log": {"level": "info", "timestamp": True},
         "dns": {
+            "strategy": str(config.get("dns_strategy") or DEFAULT_DNS_STRATEGY),
             "servers": [
                 {"tag": "proxy-dns", "address": "https://1.1.1.1/dns-query", "detour": "proxy"},
                 {"tag": "local-dns", "address": local_dns, "detour": "direct"},
@@ -428,6 +469,8 @@ RestartSec=2s
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
 NoNewPrivileges=true
+ExecStopPost=-/usr/bin/resolvectl revert vmproxy0
+ExecStopPost=-/usr/sbin/ip link delete vmproxy0
 
 [Install]
 WantedBy=multi-user.target
@@ -435,7 +478,20 @@ WantedBy=multi-user.target
     SYSTEMD_UNIT.write_text(content, encoding="utf-8")
 
 
-def apply_config(config_path: Path) -> None:
+def cleanup_runtime_network_state() -> None:
+    for cmd in (["resolvectl", "revert", "vmproxy0"], ["ip", "link", "delete", "vmproxy0"]):
+        try:
+            run(cmd, check=False)
+        except FileNotFoundError:
+            pass
+
+
+def is_service_active() -> bool:
+    result = run(["systemctl", "is-active", "vm-proxy-gateway.service"], check=False)
+    return result.stdout.strip() == "active"
+
+
+def apply_config(config_path: Path, restart_active: bool = False) -> None:
     require_root()
     raw = read_json(config_path)
     config = normalize_config(raw)
@@ -445,26 +501,34 @@ def apply_config(config_path: Path) -> None:
     write_systemd_unit()
     run(["systemctl", "daemon-reload"])
     run(["systemctl", "enable", "vm-proxy-gateway.service"])
+    if restart_active and is_service_active():
+        cleanup_runtime_network_state()
+        run(["systemctl", "restart", "vm-proxy-gateway.service"])
 
 
 def apply_and_start(config_path: Path) -> None:
     apply_config(config_path)
-    service_action("start", refresh_config=False)
+    service_action("restart" if is_service_active() else "start", refresh_config=False)
 
 
 def service_action(action: str, refresh_config: bool = True) -> None:
     require_root()
     if action not in {"start", "stop", "restart"}:
         raise GatewayError(f"Unsupported action: {action}")
+    if action in {"start", "restart"}:
+        cleanup_runtime_network_state()
     if refresh_config and action in {"start", "restart"}:
         user_config = default_user_config_path()
         if user_config:
             apply_config(user_config)
     result = run(["systemctl", action, "vm-proxy-gateway.service"], check=False)
     if result.returncode == 0:
+        if action == "stop":
+            cleanup_runtime_network_state()
         return
     missing_unit = result.returncode == 5 or "not loaded" in result.stderr.lower() or "could not be found" in result.stderr.lower()
     if action == "stop" and (missing_unit or not SYSTEMD_UNIT.exists()):
+        cleanup_runtime_network_state()
         return
     raise subprocess.CalledProcessError(result.returncode, result.args, result.stdout, result.stderr)
 
@@ -475,7 +539,10 @@ def service_status() -> dict[str, Any]:
     gateway = get_default_gateway()
     config = read_json(SYSTEM_CONFIG) if SYSTEM_CONFIG.exists() else {}
     proxy_host = config.get("proxy_host")
-    proxy_port = int(config.get("proxy_port") or DEFAULT_PORT)
+    try:
+        proxy_port = int(config.get("proxy_port") or DEFAULT_PORT)
+    except (TypeError, ValueError):
+        proxy_port = DEFAULT_PORT
     reachable = None
     error = None
     if proxy_host:
@@ -613,7 +680,7 @@ def main() -> int:
 
     try:
         if args.command == "apply":
-            apply_config(args.config)
+            apply_config(args.config, restart_active=True)
             print("Configuration applied.")
         elif args.command == "apply-start":
             apply_and_start(args.config)

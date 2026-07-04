@@ -110,6 +110,7 @@ def test_normalize_uses_dynamic_apt_sources_and_defaults() -> None:
         config = ctl.normalize_config({"proxy_host": "192.168.56.2", "proxy_protocol": "socks5"})
         assert config["bypass_system_packages"] is True
         assert config["bypass_container_registries"] is False
+        assert config["dns_strategy"] == "ipv4_only"
         assert ".mirror.internal.example" in config["bypass_domains"]
         assert ".docker.io" not in config["bypass_domains"]
         assert "apt-get" in config["bypass_processes"]
@@ -117,6 +118,22 @@ def test_normalize_uses_dynamic_apt_sources_and_defaults() -> None:
         assert ".docker.io" in enabled["bypass_domains"]
         disabled = ctl.normalize_config({"proxy_host": "192.168.56.2", "proxy_protocol": "socks5", "bypass_system_packages": False})
         assert "apt-get" not in disabled["bypass_processes"]
+        domain_host = ctl.normalize_config({"proxy_host": "proxy.vmware.local", "proxy_protocol": "socks5"})
+        assert not any("proxy.vmware.local" in cidr for cidr in domain_host["bypass_cidrs"])
+        custom = ctl.normalize_config({
+            "proxy_host": "192.168.56.2",
+            "proxy_protocol": "socks5",
+            "bypass_domains": ["HTTPS://Example.COM/path", "*.Corp.Local.", ".LAN."],
+        })
+        assert "example.com" in custom["bypass_domains"]
+        assert ".corp.local" in custom["bypass_domains"]
+        assert ".lan" in custom["bypass_domains"]
+        try:
+            ctl.normalize_config({"proxy_host": "192.168.56.2", "proxy_protocol": "socks5", "proxy_port": "bad"})
+        except ctl.GatewayError as exc:
+            assert "proxy_port" in str(exc)
+        else:
+            raise AssertionError("invalid proxy_port should fail")
     finally:
         ctl.tcp_connect = old_tcp
         ctl.get_default_gateway = old_gateway
@@ -138,6 +155,59 @@ def test_stop_missing_unit_is_safe() -> None:
         ctl.run = old_run
         ctl.is_root = old_is_root
         ctl.SYSTEMD_UNIT = old_unit
+
+
+def test_apply_restarts_active_service() -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, check=True):
+        calls.append(cmd)
+        if cmd[:2] == ["systemctl", "is-active"]:
+            return FakeResult("active\n")
+        return FakeResult()
+
+    old_run = ctl.run
+    old_is_root = ctl.is_root
+    old_normalize = ctl.normalize_config
+    old_system_dir = ctl.SYSTEM_DIR
+    old_system_config = ctl.SYSTEM_CONFIG
+    old_sing_box_config = ctl.SING_BOX_CONFIG
+    old_unit = ctl.SYSTEMD_UNIT
+    ctl.run = fake_run
+    ctl.is_root = lambda: True
+    ctl.normalize_config = lambda raw: {
+        "proxy_host": "192.168.56.2",
+        "proxy_port": 10086,
+        "proxy_protocol": "socks5",
+        "local_dns": "192.168.56.1",
+        "dns_strategy": "ipv4_only",
+        "bypass_cidrs": ["127.0.0.0/8"],
+        "bypass_domains": ["localhost"],
+        "bypass_processes": [],
+        "block_udp_when_unsupported": False,
+        "bypass_system_packages": True,
+        "bypass_container_registries": False,
+        "apt_source_domains": [],
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        ctl.SYSTEM_DIR = root / "etc"
+        ctl.SYSTEM_CONFIG = ctl.SYSTEM_DIR / "config.json"
+        ctl.SING_BOX_CONFIG = ctl.SYSTEM_DIR / "sing-box.json"
+        ctl.SYSTEMD_UNIT = root / "vm-proxy-gateway.service"
+        config_path = root / "user.json"
+        config_path.write_text("{}", encoding="utf-8")
+        try:
+            ctl.apply_config(config_path, restart_active=True)
+            assert ["systemctl", "restart", "vm-proxy-gateway.service"] in calls
+        finally:
+            ctl.run = old_run
+            ctl.is_root = old_is_root
+            ctl.normalize_config = old_normalize
+            ctl.SYSTEM_DIR = old_system_dir
+            ctl.SYSTEM_CONFIG = old_system_config
+            ctl.SING_BOX_CONFIG = old_sing_box_config
+            ctl.SYSTEMD_UNIT = old_unit
 
 
 def test_single_instance_lock() -> None:
@@ -173,17 +243,21 @@ def test_sing_box_config_shape() -> None:
         "proxy_port": 10086,
         "proxy_protocol": "socks5",
         "local_dns": "192.168.56.1",
+        "dns_strategy": "ipv4_only",
         "bypass_cidrs": ["127.0.0.0/8", "192.168.56.0/24"],
         "bypass_domains": ["localhost", ".ubuntu.com", ".mirror.internal.example"],
         "bypass_processes": ["apt", "apt-get", "http", "https"],
+        "block_udp_when_unsupported": True,
     }
     sing = ctl.build_sing_box_config(config)
+    assert sing["dns"]["strategy"] == "ipv4_only"
     assert sing["dns"]["servers"][1]["address"] == "192.168.56.1"
     assert sing["dns"]["servers"][1]["detour"] == "direct"
     assert sing["route"]["rules"][0]["protocol"] == "dns"
     assert sing["route"]["rules"][0]["outbound"] == "dns-out"
-    assert "apt-get" in sing["route"]["rules"][1]["process_name"]
-    assert "ubuntu.com" in sing["route"]["rules"][3]["domain_suffix"]
+    assert any(rule.get("network") == "udp" and rule.get("outbound") == "block" for rule in sing["route"]["rules"])
+    assert any("apt-get" in rule.get("process_name", []) for rule in sing["route"]["rules"])
+    assert any("ubuntu.com" in rule.get("domain_suffix", []) for rule in sing["route"]["rules"])
     assert any(outbound["tag"] == "dns-out" and outbound["type"] == "dns" for outbound in sing["outbounds"])
     sing_box = Path("/usr/local/bin/sing-box")
     if sing_box.exists():
@@ -205,6 +279,7 @@ def main() -> int:
         ("apt_sources_deb822_and_list", test_apt_sources_deb822_and_list),
         ("normalize_uses_dynamic_apt_sources_and_defaults", test_normalize_uses_dynamic_apt_sources_and_defaults),
         ("stop_missing_unit_is_safe", test_stop_missing_unit_is_safe),
+        ("apply_restarts_active_service", test_apply_restarts_active_service),
         ("single_instance_lock", test_single_instance_lock),
         ("active_tray_icon_tint", test_active_tray_icon_tint),
         ("sing_box_config_shape", test_sing_box_config_shape),

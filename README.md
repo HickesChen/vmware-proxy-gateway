@@ -148,6 +148,17 @@ Or use the built-in diagnosis:
 vm-proxy-gateway diagnose --config ~/.config/vm-proxy-gateway/config.json
 ```
 
+For public websites, prefer TCP/HTTPS checks over ICMP checks:
+
+```bash
+curl -4 -I https://www.google.com
+```
+
+The generated DNS configuration uses IPv4-only answers by default because many
+Ubuntu VMs have no usable IPv6 route even when DNS returns IPv6 records. A
+failed `ping -6` usually means IPv6 is unavailable in the VM, not that the
+Windows proxy is broken.
+
 If TCP port `10086` is unreachable from Ubuntu, check the Windows proxy app:
 
 - Enable LAN access / allow LAN.
@@ -233,9 +244,10 @@ python3 tools/validate_scenarios.py
 ```
 
 The checks simulate different DNS setups, systemd-resolved stub DNS, Deb822 and
-legacy APT source formats, custom mirror domains, container registry defaults,
-safe stop behavior when the service unit is missing, single-instance GUI locking,
-and generated sing-box config shape.
+legacy APT source formats, custom mirror domains, domain proxy hosts, invalid
+proxy ports, container registry defaults, safe stop behavior when the service
+unit is missing, active-service config restarts, single-instance GUI locking,
+active tray icon tinting, UDP blocking, and generated sing-box config shape.
 
 ## GitHub Project Hygiene
 

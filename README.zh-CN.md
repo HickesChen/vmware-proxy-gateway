@@ -109,6 +109,14 @@ nc -vz <host-ip> 10086
 vm-proxy-gateway diagnose --config ~/.config/vm-proxy-gateway/config.json
 ```
 
+测试公网网站时，建议优先用 TCP/HTTPS 检查，而不是 ICMP：
+
+```bash
+curl -4 -I https://www.google.com
+```
+
+生成的 DNS 配置默认使用 IPv4-only 策略，因为很多 Ubuntu 虚拟机即使能解析到 IPv6 记录，也没有可用的 IPv6 路由。`ping -6` 失败通常表示虚拟机 IPv6 不可用，不代表 Windows 代理坏了。
+
 如果 Ubuntu 无法连接 TCP `10086`，请检查 Windows 代理软件：
 
 - 开启 LAN access / allow LAN。
@@ -173,7 +181,7 @@ sudo vm-proxy-gateway uninstall
 python3 tools/validate_scenarios.py
 ```
 
-验证内容包括不同 DNS 设置、systemd-resolved stub DNS、Deb822 和传统 APT 源格式、自定义镜像域名、容器仓库默认值、服务 unit 缺失时的安全停止、GUI 单实例锁，以及生成的 sing-box 配置结构。
+验证内容包括不同 DNS 设置、systemd-resolved stub DNS、Deb822 和传统 APT 源格式、自定义镜像域名、代理主机为域名、非法代理端口、容器仓库默认值、服务 unit 缺失时的安全停止、服务运行中应用配置自动重启、GUI 单实例锁、开启态托盘图标染色、UDP 阻止规则，以及生成的 sing-box 配置结构。
 
 ## GitHub 仓库内容
 

@@ -84,7 +84,15 @@ install_sing_box() {
     return
   fi
 
-  if command -v sing-box >/dev/null 2>&1 || [[ -x "${SING_BOX_BIN}" ]]; then
+  if [[ -x "${SING_BOX_BIN}" ]]; then
+    return
+  fi
+
+  if command -v sing-box >/dev/null 2>&1; then
+    local existing
+    existing="$(command -v sing-box)"
+    echo "Using existing sing-box from ${existing}."
+    install -m 0755 "${existing}" "${SING_BOX_BIN}"
     return
   fi
 
@@ -98,13 +106,24 @@ install_sing_box() {
 
   local tmp version url
   tmp="$(mktemp -d)"
+  trap 'rm -rf "${tmp}"' RETURN
   version="1.10.7"
   url="https://github.com/SagerNet/sing-box/releases/download/v${version}/sing-box-${version}-linux-${arch}.tar.gz"
   echo "Downloading sing-box ${version} for linux-${arch}..."
   curl -fL "${url}" -o "${tmp}/sing-box.tar.gz"
   tar -xzf "${tmp}/sing-box.tar.gz" -C "${tmp}"
   install -m 0755 "${tmp}/sing-box-${version}-linux-${arch}/sing-box" "${SING_BOX_BIN}"
+  trap - RETURN
   rm -rf "${tmp}"
+}
+
+verify_sing_box() {
+  if [[ ! -x "${SING_BOX_BIN}" ]]; then
+    echo "sing-box was not installed at ${SING_BOX_BIN}." >&2
+    echo "Install sing-box manually or rerun without --skip-sing-box." >&2
+    exit 1
+  fi
+  "${SING_BOX_BIN}" version >/dev/null
 }
 
 cleanup_old_install() {
@@ -194,6 +213,7 @@ EOF
 stop_running_service_before_network
 install_packages
 install_sing_box
+verify_sing_box
 cleanup_old_install
 install_files
 install_sudoers

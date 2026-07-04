@@ -30,6 +30,8 @@ USER_CONFIG = Path.home() / ".config" / "vm-proxy-gateway" / "config.json"
 LOCK_FILE = Path.home() / ".config" / "vm-proxy-gateway" / "gui.lock"
 CONTROLLER = Path("/opt/vm-proxy-gateway/vm_proxy_gateway.py")
 ICON_NAME = "vm-proxy-gateway.png"
+TRAY_ACTIVE_COLOR_DARK = (151, 84, 0)
+TRAY_ACTIVE_COLOR_LIGHT = (255, 186, 59)
 DEFAULT_CONFIG = {
     "proxy_host": "",
     "proxy_port": 10086,
@@ -46,6 +48,21 @@ LANGUAGES = {
     "zh_CN": "简体中文",
     "zh_TW": "繁體中文",
 }
+
+
+def make_active_tray_image(image):
+    if Image is None:
+        return image
+    rgba = image.convert("RGBA")
+    alpha = rgba.getchannel("A")
+    luminance = rgba.convert("L")
+    dark = Image.new("RGBA", rgba.size, TRAY_ACTIVE_COLOR_DARK + (255,))
+    light = Image.new("RGBA", rgba.size, TRAY_ACTIVE_COLOR_LIGHT + (255,))
+    tinted = Image.composite(light, dark, luminance)
+    tinted.putalpha(alpha)
+    return tinted
+
+
 TEXT = {
     "en": {
         "language": "Language",
@@ -422,6 +439,8 @@ class App(tk.Tk):
         self._exiting = False
         self._tray_icon = None
         self._tray_thread: threading.Thread | None = None
+        self._tray_images: dict[str, object] = {}
+        self._tray_active = False
 
         self._build()
         self._set_window_icon()
@@ -510,11 +529,26 @@ class App(tk.Tk):
         except tk.TclError:
             pass
 
-    def _tray_image(self):
+    def _tray_image(self, active: bool = False):
+        cache_key = "active" if active else "inactive"
+        if cache_key in self._tray_images:
+            return self._tray_images[cache_key]
         path = find_asset(ICON_NAME)
         if not path or Image is None:
             return None
-        return Image.open(path)
+        base = Image.open(path).convert("RGBA")
+        image = make_active_tray_image(base) if active else base
+        self._tray_images[cache_key] = image
+        return image
+
+    def set_tray_active(self, active: bool) -> None:
+        self._tray_active = active
+        if self._tray_icon is None:
+            return
+        image = self._tray_image(active)
+        if image is None:
+            return
+        self._tray_icon.icon = image
 
     def _call_from_tray(self, callback: Callable[[], None], title: str | None = None) -> None:
         if not self._exiting:
@@ -552,7 +586,7 @@ class App(tk.Tk):
     def start_tray(self) -> None:
         if pystray is None:
             return
-        image = self._tray_image()
+        image = self._tray_image(self._tray_active)
         if image is None:
             return
         self._tray_icon = pystray.Icon("vm-proxy-gateway", image, self.tr("tray_tooltip"), self._tray_menu())
@@ -886,6 +920,7 @@ class App(tk.Tk):
 
     def refresh_status(self, notify: bool = True) -> None:
         if not CONTROLLER.exists():
+            self.set_tray_active(False)
             self._set_status("status_not_installed")
             self.log(self.tr("log_status"), self.tr("status_missing_controller", path=CONTROLLER))
             return
@@ -896,6 +931,7 @@ class App(tk.Tk):
         if result.returncode == 0:
             try:
                 data = json.loads(result.stdout)
+                self.set_tray_active(data.get("active") == "active")
                 self._set_status(
                     "status_summary",
                     active=data.get("active"),
@@ -904,8 +940,10 @@ class App(tk.Tk):
                     port=data.get("proxy_port"),
                 )
             except json.JSONDecodeError:
+                self.set_tray_active(False)
                 self._set_status("status_non_json")
         else:
+            self.set_tray_active(False)
             self._set_status("status_failed")
 
     def discover(self) -> None:

@@ -2,6 +2,12 @@
 
 [简体中文](CHANGELOG.zh-CN.md)
 
+## 0.1.4
+
+- Added an orange-yellow active tray icon so users can distinguish proxy on/off
+  state from the system tray.
+- Added validation coverage for active tray icon tinting.
+
 ## 0.1.3
 
 - Added English, Simplified Chinese, and Traditional Chinese GUI language selection.

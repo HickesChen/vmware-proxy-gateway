@@ -154,6 +154,19 @@ def test_single_instance_lock() -> None:
             gui.LOCK_FILE = old_lock_file
 
 
+def test_active_tray_icon_tint() -> None:
+    assert gui.Image is not None
+    image = gui.Image.new("RGBA", (2, 2), (20, 40, 80, 255))
+    image.putpixel((0, 0), (0, 0, 0, 0))
+    tinted = gui.make_active_tray_image(image)
+    transparent = tinted.getpixel((0, 0))
+    colored = tinted.getpixel((1, 1))
+    assert transparent[3] == 0
+    assert colored[0] > colored[1] > colored[2]
+    assert colored[0] >= 151
+    assert colored[1] >= 84
+
+
 def test_sing_box_config_shape() -> None:
     config = {
         "proxy_host": "192.168.56.2",
@@ -193,6 +206,7 @@ def main() -> int:
         ("normalize_uses_dynamic_apt_sources_and_defaults", test_normalize_uses_dynamic_apt_sources_and_defaults),
         ("stop_missing_unit_is_safe", test_stop_missing_unit_is_safe),
         ("single_instance_lock", test_single_instance_lock),
+        ("active_tray_icon_tint", test_active_tray_icon_tint),
         ("sing_box_config_shape", test_sing_box_config_shape),
     ]
     for name, func in checks:

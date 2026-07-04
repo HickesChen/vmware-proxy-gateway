@@ -1,0 +1,205 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import importlib.util
+import json
+import subprocess
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+CONTROLLER = ROOT / "app" / "vm_proxy_gateway.py"
+GUI = ROOT / "app" / "vm_proxy_gateway_gui.py"
+
+
+def load_module(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+ctl = load_module("vm_proxy_gateway", CONTROLLER)
+gui = load_module("vm_proxy_gateway_gui", GUI)
+
+
+class FakeResult:
+    def __init__(self, stdout: str = "", stderr: str = "", returncode: int = 0):
+        self.stdout = stdout
+        self.stderr = stderr
+        self.returncode = returncode
+        self.args = []
+
+
+def check(name: str, func) -> None:
+    func()
+    print(f"PASS {name}")
+
+
+def test_dns_from_resolvectl() -> None:
+    def runner(cmd, check=True):
+        return FakeResult("Global:\nLink 2 (ens33): 192.168.0.1 2001:4860:4860::8888\n")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        resolv = Path(tmp) / "resolv.conf"
+        resolv.write_text("nameserver 127.0.0.53\n", encoding="utf-8")
+        assert ctl.get_system_dns_server(resolv_conf=resolv, runner=runner) == "192.168.0.1"
+
+
+def test_dns_from_resolv_conf() -> None:
+    def missing_runner(cmd, check=True):
+        raise FileNotFoundError
+
+    with tempfile.TemporaryDirectory() as tmp:
+        resolv = Path(tmp) / "resolv.conf"
+        resolv.write_text("nameserver 127.0.0.53\nnameserver 10.0.2.3\n", encoding="utf-8")
+        assert ctl.get_system_dns_server(resolv_conf=resolv, runner=missing_runner) == "10.0.2.3"
+
+
+def test_dns_falls_back_to_gateway() -> None:
+    def missing_runner(cmd, check=True):
+        raise FileNotFoundError
+
+    old_gateway = ctl.get_default_gateway
+    ctl.get_default_gateway = lambda: "172.16.1.1"
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            resolv = Path(tmp) / "resolv.conf"
+            resolv.write_text("nameserver 127.0.0.53\n", encoding="utf-8")
+            assert ctl.get_system_dns_server(resolv_conf=resolv, runner=missing_runner) == "172.16.1.1"
+    finally:
+        ctl.get_default_gateway = old_gateway
+
+
+def test_apt_sources_deb822_and_list() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        apt = Path(tmp)
+        apt.joinpath("sources.list").write_text(
+            "deb [arch=amd64 signed-by=/x.gpg] https://mirrors.aliyun.com/ubuntu noble main\n"
+            "# deb https://ignored.example/ubuntu noble main\n",
+            encoding="utf-8",
+        )
+        d = apt / "sources.list.d"
+        d.mkdir()
+        d.joinpath("ubuntu.sources").write_text(
+            "Types: deb\n"
+            "URIs: http://cn.archive.ubuntu.com/ubuntu/ https://mirror.internal.example/repo\n"
+            "Suites: noble noble-updates\n",
+            encoding="utf-8",
+        )
+        domains = set(ctl.get_apt_source_domains(apt))
+        assert ".mirrors.aliyun.com" in domains
+        assert ".cn.archive.ubuntu.com" in domains
+        assert ".mirror.internal.example" in domains
+        assert ".ignored.example" not in domains
+
+
+def test_normalize_uses_dynamic_apt_sources_and_defaults() -> None:
+    old_tcp = ctl.tcp_connect
+    old_gateway = ctl.get_default_gateway
+    old_local = ctl.get_local_ipv4_cidrs
+    old_dns = ctl.get_system_dns_server
+    old_apt = ctl.get_apt_source_domains
+    ctl.tcp_connect = lambda host, port: (True, "ok")
+    ctl.get_default_gateway = lambda: "192.168.56.1"
+    ctl.get_local_ipv4_cidrs = lambda: ["192.168.56.0/24"]
+    ctl.get_system_dns_server = lambda: "192.168.56.1"
+    ctl.get_apt_source_domains = lambda: [".mirror.internal.example"]
+    try:
+        config = ctl.normalize_config({"proxy_host": "192.168.56.2", "proxy_protocol": "socks5"})
+        assert config["bypass_system_packages"] is True
+        assert config["bypass_container_registries"] is False
+        assert ".mirror.internal.example" in config["bypass_domains"]
+        assert ".docker.io" not in config["bypass_domains"]
+        assert "apt-get" in config["bypass_processes"]
+        enabled = ctl.normalize_config({"proxy_host": "192.168.56.2", "proxy_protocol": "socks5", "bypass_container_registries": True})
+        assert ".docker.io" in enabled["bypass_domains"]
+        disabled = ctl.normalize_config({"proxy_host": "192.168.56.2", "proxy_protocol": "socks5", "bypass_system_packages": False})
+        assert "apt-get" not in disabled["bypass_processes"]
+    finally:
+        ctl.tcp_connect = old_tcp
+        ctl.get_default_gateway = old_gateway
+        ctl.get_local_ipv4_cidrs = old_local
+        ctl.get_system_dns_server = old_dns
+        ctl.get_apt_source_domains = old_apt
+
+
+def test_stop_missing_unit_is_safe() -> None:
+    old_run = ctl.run
+    old_is_root = ctl.is_root
+    old_unit = ctl.SYSTEMD_UNIT
+    ctl.is_root = lambda: True
+    ctl.SYSTEMD_UNIT = Path("/tmp/vm-proxy-gateway-unit-that-does-not-exist.service")
+    ctl.run = lambda cmd, check=True: FakeResult(stderr="Unit vm-proxy-gateway.service could not be found.\n", returncode=5)
+    try:
+        ctl.service_action("stop")
+    finally:
+        ctl.run = old_run
+        ctl.is_root = old_is_root
+        ctl.SYSTEMD_UNIT = old_unit
+
+
+def test_single_instance_lock() -> None:
+    old_lock_file = gui.LOCK_FILE
+    with tempfile.TemporaryDirectory() as tmp:
+        gui.LOCK_FILE = Path(tmp) / "gui.lock"
+        lock = gui.acquire_single_instance()
+        try:
+            assert lock is not None
+            assert gui.acquire_single_instance() is None
+        finally:
+            if lock:
+                lock.close()
+            gui.LOCK_FILE = old_lock_file
+
+
+def test_sing_box_config_shape() -> None:
+    config = {
+        "proxy_host": "192.168.56.2",
+        "proxy_port": 10086,
+        "proxy_protocol": "socks5",
+        "local_dns": "192.168.56.1",
+        "bypass_cidrs": ["127.0.0.0/8", "192.168.56.0/24"],
+        "bypass_domains": ["localhost", ".ubuntu.com", ".mirror.internal.example"],
+        "bypass_processes": ["apt", "apt-get", "http", "https"],
+    }
+    sing = ctl.build_sing_box_config(config)
+    assert sing["dns"]["servers"][1]["address"] == "192.168.56.1"
+    assert sing["dns"]["servers"][1]["detour"] == "direct"
+    assert sing["route"]["rules"][0]["protocol"] == "dns"
+    assert sing["route"]["rules"][0]["outbound"] == "dns-out"
+    assert "apt-get" in sing["route"]["rules"][1]["process_name"]
+    assert "ubuntu.com" in sing["route"]["rules"][3]["domain_suffix"]
+    assert any(outbound["tag"] == "dns-out" and outbound["type"] == "dns" for outbound in sing["outbounds"])
+    sing_box = Path("/usr/local/bin/sing-box")
+    if sing_box.exists():
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump(sing, f)
+            tmp = Path(f.name)
+        try:
+            result = subprocess.run([str(sing_box), "check", "-c", str(tmp)], text=True, capture_output=True)
+            assert result.returncode == 0, result.stderr or result.stdout
+        finally:
+            tmp.unlink(missing_ok=True)
+
+
+def main() -> int:
+    checks = [
+        ("dns_from_resolvectl", test_dns_from_resolvectl),
+        ("dns_from_resolv_conf", test_dns_from_resolv_conf),
+        ("dns_falls_back_to_gateway", test_dns_falls_back_to_gateway),
+        ("apt_sources_deb822_and_list", test_apt_sources_deb822_and_list),
+        ("normalize_uses_dynamic_apt_sources_and_defaults", test_normalize_uses_dynamic_apt_sources_and_defaults),
+        ("stop_missing_unit_is_safe", test_stop_missing_unit_is_safe),
+        ("single_instance_lock", test_single_instance_lock),
+        ("sing_box_config_shape", test_sing_box_config_shape),
+    ]
+    for name, func in checks:
+        check(name, func)
+    print(f"PASS all {len(checks)} scenario checks")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

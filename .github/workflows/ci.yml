@@ -1,0 +1,22 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk python3-pil
+      - name: Syntax checks
+        run: |
+          python3 -m py_compile app/vm_proxy_gateway.py app/vm_proxy_gateway_gui.py tools/validate_scenarios.py
+          bash -n install.sh
+          bash -n uninstall.sh
+      - name: Scenario validation
+        run: python3 tools/validate_scenarios.py

@@ -19,9 +19,12 @@ from typing import Callable
 
 try:
     import pystray
-    from PIL import Image
 except Exception:
     pystray = None
+
+try:
+    from PIL import Image
+except Exception:
     Image = None
 
 

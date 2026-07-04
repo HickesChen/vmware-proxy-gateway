@@ -13,13 +13,17 @@
    python3 tools/validate_scenarios.py
    ```
 
-4. 在父目录构建发布压缩包：
+4. 提交修改并推送 `main`。
+5. 创建并推送版本 tag：
 
    ```bash
-   zip -r vm-proxy-gateway-$(cat vm-proxy-gateway/VERSION).zip vm-proxy-gateway -x '*/.git/*' '*/__pycache__/*'
+   git tag -a v$(cat VERSION) -m "Release v$(cat VERSION)"
+   git push origin v$(cat VERSION)
    ```
 
-5. 在全新 Ubuntu 虚拟机安装并验证：
+   GitHub Actions 会自动构建发布 zip，并把它挂到 GitHub Release。
+
+6. 在全新 Ubuntu 虚拟机安装并验证：
 
    ```bash
    sudo ./install.sh
@@ -27,7 +31,7 @@
    vm-proxy-gateway status
    ```
 
-6. 确认卸载清理：
+7. 确认卸载清理：
 
    ```bash
    sudo ./uninstall.sh

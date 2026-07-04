@@ -1,0 +1,43 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk python3-pil
+          python3 -m py_compile app/vm_proxy_gateway.py app/vm_proxy_gateway_gui.py tools/validate_scenarios.py
+          bash -n install.sh
+          bash -n uninstall.sh
+          python3 tools/validate_scenarios.py
+      - name: Build archive
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          archive="vmware-proxy-gateway-${version}.zip"
+          mkdir -p dist/vmware-proxy-gateway
+          rsync -a \
+            --exclude '.git' \
+            --exclude '__pycache__' \
+            --exclude '*.pyc' \
+            --exclude 'dist' \
+            ./ dist/vmware-proxy-gateway/
+          (cd dist && zip -r "${archive}" vmware-proxy-gateway)
+          echo "archive=dist/${archive}" >> "$GITHUB_ENV"
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" "$archive" \
+            --title "VMware Proxy Gateway $GITHUB_REF_NAME" \
+            --notes "Automated release for $GITHUB_REF_NAME."

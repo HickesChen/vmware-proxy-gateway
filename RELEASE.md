@@ -13,13 +13,18 @@
    python3 tools/validate_scenarios.py
    ```
 
-4. Build the release archive from the parent directory:
+4. Commit the changes and push `main`.
+5. Create and push a version tag:
 
    ```bash
-   zip -r vm-proxy-gateway-$(cat vm-proxy-gateway/VERSION).zip vm-proxy-gateway -x '*/.git/*' '*/__pycache__/*'
+   git tag -a v$(cat VERSION) -m "Release v$(cat VERSION)"
+   git push origin v$(cat VERSION)
    ```
 
-5. Install on a fresh Ubuntu VM and verify:
+   GitHub Actions will build the release zip and attach it to the GitHub
+   Release automatically.
+
+6. Install on a fresh Ubuntu VM and verify:
 
    ```bash
    sudo ./install.sh
@@ -27,7 +32,7 @@
    vm-proxy-gateway status
    ```
 
-6. Confirm uninstall cleanup:
+7. Confirm uninstall cleanup:
 
    ```bash
    sudo ./uninstall.sh

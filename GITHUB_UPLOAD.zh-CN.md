@@ -35,8 +35,8 @@ git tag -a v0.1.3 -m "Release v0.1.3"
 git push origin v0.1.3
 ```
 
-然后在 GitHub 页面创建 Release，选择 `v0.1.3` 这个 tag，并上传
-`vm-proxy-gateway-0.1.3.zip` 作为 release 附件。zip 是发布附件，不是仓库源码。
+推送 tag 后，GitHub Actions 会自动创建 GitHub Release，并上传
+`vmware-proxy-gateway-0.1.3.zip`。zip 是发布附件，不是仓库源码。
 
 ## 以后发布新版本
 
@@ -49,7 +49,7 @@ git push origin v0.1.3
 5. 提交代码。
 6. 打 tag。
 7. 推送代码和 tag。
-8. 在 GitHub Release 里上传对应版本的 zip。
+8. 等待 GitHub Actions 自动创建 Release 和 zip 附件。
 
 示例：
 
@@ -65,14 +65,14 @@ python3 tools/validate_scenarios.py
 git add .
 git commit -m "Release v0.1.4"
 git tag -a v0.1.4 -m "Release v0.1.4"
-git push
+git push origin main
 git push origin v0.1.4
 ```
 
-如果需要生成 zip 发布包，可以在父目录运行：
+如果需要在本地临时生成 zip 测试包，可以在父目录运行：
 
 ```bash
-zip -r vm-proxy-gateway-0.1.4.zip vm-proxy-gateway -x '*/.git/*' '*/__pycache__/*'
+zip -r vmware-proxy-gateway-0.1.4.zip vm-proxy-gateway -x '*/.git/*' '*/__pycache__/*'
 ```
 
 注意：仓库目录名可以一直叫 `vm-proxy-gateway`，不需要叫

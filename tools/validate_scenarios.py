@@ -32,6 +32,17 @@ class FakeResult:
         self.args = []
 
 
+class FakeGetVar:
+    def __init__(self, value: str):
+        self.value = value
+
+    def get(self) -> str:
+        return self.value
+
+    def set(self, value: str) -> None:
+        self.value = value
+
+
 def check(name: str, func) -> None:
     func()
     print(f"PASS {name}")
@@ -128,6 +139,28 @@ def test_normalize_uses_dynamic_apt_sources_and_defaults() -> None:
         assert "example.com" in custom["bypass_domains"]
         assert ".corp.local" in custom["bypass_domains"]
         assert ".lan" in custom["bypass_domains"]
+        wildcard = ctl.normalize_config({
+            "proxy_host": "192.168.56.2",
+            "proxy_protocol": "socks5",
+            "bypass_cidrs": ["192.168.10.*", "10.*.*.*"],
+        })
+        assert "192.168.10.0/24" in wildcard["bypass_cidrs"]
+        assert "10.0.0.0/8" in wildcard["bypass_cidrs"]
+        structured = ctl.normalize_config({
+            "proxy_host": "192.168.56.2",
+            "proxy_protocol": "socks5",
+            "bypass_rules": [
+                {"type": "domain_keyword", "value": "GitHub", "invert": False},
+                {"type": "domain_prefix", "value": "mirror-", "invert": False},
+                {"type": "ip_cidr", "value": "172.20.*.*", "invert": True},
+            ],
+        })
+        assert structured["bypass_rules"][0]["value"] == "github"
+        assert structured["bypass_rules"][2] == {
+            "type": "ip_cidr",
+            "value": "172.20.0.0/16",
+            "invert": True,
+        }
         try:
             ctl.normalize_config({"proxy_host": "192.168.56.2", "proxy_protocol": "socks5", "proxy_port": "bad"})
         except ctl.GatewayError as exc:
@@ -140,6 +173,120 @@ def test_normalize_uses_dynamic_apt_sources_and_defaults() -> None:
         ctl.get_local_ipv4_cidrs = old_local
         ctl.get_system_dns_server = old_dns
         ctl.get_apt_source_domains = old_apt
+
+
+def test_wildcard_cidr_validation() -> None:
+    assert ctl.normalize_bypass_cidr("192.168.*.*") == "192.168.0.0/16"
+    assert ctl.normalize_bypass_cidr("*") == "0.0.0.0/0"
+    try:
+        ctl.normalize_bypass_cidr("192.*.1.*")
+    except ValueError as exc:
+        assert "trailing" in str(exc)
+    else:
+        raise AssertionError("non-trailing wildcard should fail")
+
+
+def test_traffic_log_parser() -> None:
+    raw = (
+        "+0800 2026-07-10 09:24:37 INFO [2967477805 9ms] "
+        "outbound/socks[proxy]: outbound connection to chatgpt.com:443\n"
+        "+0800 2026-07-10 09:24:38 INFO [330599505 8ms] "
+        "outbound/direct[direct]: outbound packet connection to 185.125.190.58:123\n"
+    )
+    entries = ctl.parse_traffic_logs(raw, "192.168.56.1:10086")
+    assert len(entries) == 2
+    assert entries[1]["destination"] == "chatgpt.com"
+    assert entries[1]["port"] == 443
+    assert entries[1]["via"] == "192.168.56.1:10086"
+    assert entries[0]["route"] == "direct"
+    assert entries[0]["network"] == "udp"
+
+
+def test_gui_log_keeps_popup_content() -> None:
+    app = object.__new__(gui.App)
+    app.language_code = "zh_CN"
+    app._last_log_title = ""
+    app._last_log_content = ""
+    result = FakeResult(
+        stdout=json.dumps({
+            "proxy": "socks5://192.168.31.203:10086",
+            "proxy_reachable": True,
+            "proxy_http_test": "ok",
+            "proxy_public_ip": "203.0.113.8",
+        })
+    )
+    gui.App.log(app, "测试", result, kind="test")
+    assert "正在检查代理连通性" in app._last_log_content
+    assert "出口 IP：203.0.113.8" in app._last_log_content
+
+
+def test_gui_effective_rules_include_protection() -> None:
+    app = object.__new__(gui.App)
+    app.proxy_host = FakeGetVar("192.168.31.203")
+    app.bypass_rules = [{"type": "domain_keyword", "value": "mirror", "invert": False}]
+    app._effective_cidrs = set(gui.PROTECTIVE_BYPASS_CIDRS)
+    app._effective_domains = set(gui.PROTECTIVE_BYPASS_DOMAINS)
+    app._local_cidrs = {"192.168.31.0/24", "192.168.31.88/32"}
+    app._default_gateway = "192.168.31.1"
+    rows = gui.App._effective_rule_rows(app)
+    values = {row["value"] for row in rows}
+    for expected in {
+        "127.0.0.0/8",
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "localhost",
+        "192.168.31.0/24",
+        "192.168.31.88/32",
+        "192.168.31.1/32",
+        "192.168.31.203/32",
+        "mirror",
+    }:
+        assert expected in values
+    assert all(not row["editable"] for row in rows if row["value"] != "mirror")
+
+
+def test_gui_traffic_block_filter_and_sort() -> None:
+    app = object.__new__(gui.App)
+    app.traffic_search = FakeGetVar("")
+    app.traffic_route = FakeGetVar("block")
+    app._traffic_sort_column = "port"
+    app._traffic_sort_reverse = False
+    app._traffic_entries = [
+        {"destination": "dns.example", "port": 53, "route": "block", "network": "udp"},
+        {"destination": "ntp.example", "port": 123, "route": "block", "network": "udp"},
+        {"destination": "web.example", "port": 443, "route": "proxy", "network": "tcp"},
+    ]
+    visible = gui.App._sorted_visible_traffic_entries(app)
+    assert [entry["port"] for entry in visible] == [53, 123]
+
+
+def test_gui_discover_populates_and_shows_result() -> None:
+    app = object.__new__(gui.App)
+    app.language_code = "zh_CN"
+    app.proxy_host = FakeGetVar("")
+    app._last_log_title = ""
+    app._last_log_content = ""
+    calls = []
+    app._set_button_busy = lambda key, text_key: calls.append(("busy", key, text_key))
+    app._restore_button = lambda key: calls.append(("restore", key))
+    app._update_effective_rule_context = lambda data: calls.append(("rules", data["default_gateway"]))
+    app._set_status = lambda key, **kwargs: calls.append(("status", key, kwargs))
+    app._show_result = lambda title, ok, warning=False: calls.append(("popup", title, ok, warning))
+    app.maybe_notify_tray_action = lambda ok=True: None
+    old_controller = gui.run_controller
+    gui.run_controller = lambda command: FakeResult(json.dumps({
+        "default_gateway": "192.168.31.1",
+        "local_cidrs": ["192.168.31.0/24"],
+        "proxy_candidates": ["192.168.31.1"],
+    }))
+    try:
+        gui.App.discover(app)
+    finally:
+        gui.run_controller = old_controller
+    assert app.proxy_host.get() == "192.168.31.1"
+    assert ("busy", "discover", "discovering") in calls
+    assert ("popup", "发现", True, False) in calls
 
 
 def test_stop_missing_unit_is_safe() -> None:
@@ -246,6 +393,11 @@ def test_sing_box_config_shape() -> None:
         "dns_strategy": "ipv4_only",
         "bypass_cidrs": ["127.0.0.0/8", "192.168.56.0/24"],
         "bypass_domains": ["localhost", ".ubuntu.com", ".mirror.internal.example"],
+        "bypass_rules": [
+            {"type": "domain_keyword", "value": "github", "invert": False},
+            {"type": "domain_prefix", "value": "mirror-", "invert": False},
+            {"type": "domain_regex", "value": r"^api[0-9]+\\.example\\.com$", "invert": True},
+        ],
         "bypass_processes": ["apt", "apt-get", "http", "https"],
         "block_udp_when_unsupported": True,
     }
@@ -258,6 +410,9 @@ def test_sing_box_config_shape() -> None:
     assert any(rule.get("network") == "udp" and rule.get("outbound") == "block" for rule in sing["route"]["rules"])
     assert any("apt-get" in rule.get("process_name", []) for rule in sing["route"]["rules"])
     assert any("ubuntu.com" in rule.get("domain_suffix", []) for rule in sing["route"]["rules"])
+    assert any("github" in rule.get("domain_keyword", []) for rule in sing["route"]["rules"])
+    assert any("^mirror\\-" in rule.get("domain_regex", []) for rule in sing["route"]["rules"])
+    assert any(rule.get("invert") is True for rule in sing["route"]["rules"])
     assert any(outbound["tag"] == "dns-out" and outbound["type"] == "dns" for outbound in sing["outbounds"])
     sing_box = Path("/usr/local/bin/sing-box")
     if sing_box.exists():
@@ -278,6 +433,12 @@ def main() -> int:
         ("dns_falls_back_to_gateway", test_dns_falls_back_to_gateway),
         ("apt_sources_deb822_and_list", test_apt_sources_deb822_and_list),
         ("normalize_uses_dynamic_apt_sources_and_defaults", test_normalize_uses_dynamic_apt_sources_and_defaults),
+        ("wildcard_cidr_validation", test_wildcard_cidr_validation),
+        ("traffic_log_parser", test_traffic_log_parser),
+        ("gui_log_keeps_popup_content", test_gui_log_keeps_popup_content),
+        ("gui_effective_rules_include_protection", test_gui_effective_rules_include_protection),
+        ("gui_traffic_block_filter_and_sort", test_gui_traffic_block_filter_and_sort),
+        ("gui_discover_populates_and_shows_result", test_gui_discover_populates_and_shows_result),
         ("stop_missing_unit_is_safe", test_stop_missing_unit_is_safe),
         ("apply_restarts_active_service", test_apply_restarts_active_service),
         ("single_instance_lock", test_single_instance_lock),

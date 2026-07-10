@@ -14,6 +14,7 @@ import ipaddress
 import json
 import os
 import pwd
+import re
 import socket
 import subprocess
 import sys
@@ -97,6 +98,12 @@ SYSTEM_PACKAGE_PROCESSES = [
     "snapd",
     "flatpak",
 ]
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;:]*m")
+TRAFFIC_LOG_RE = re.compile(
+    r"(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*?"
+    r"\[(?P<connection_id>\d+) [^]]+\] outbound/(?P<outbound_type>[^[]+)"
+    r"\[(?P<route>[^]]+)\]: outbound (?P<packet>packet )?connection to (?P<destination>.+)$"
+)
 
 
 class GatewayError(RuntimeError):
@@ -218,6 +225,82 @@ def ip_cidr_for_host(host: str) -> str | None:
     except ValueError:
         return None
     return f"{ip}/{ip.max_prefixlen}"
+
+
+def normalize_bypass_cidr(value: str) -> str:
+    value = value.strip()
+    if "*" not in value:
+        return str(ipaddress.ip_network(value, strict=False))
+
+    if value == "*":
+        return "0.0.0.0/0"
+    parts = value.split(".")
+    if len(parts) != 4:
+        raise ValueError("IPv4 wildcard patterns must contain four octets, for example 192.168.*.*")
+
+    first_wildcard = next((index for index, part in enumerate(parts) if part == "*"), None)
+    if first_wildcard is None or any(part != "*" for part in parts[first_wildcard:]):
+        raise ValueError("wildcards must be trailing complete octets, for example 192.168.1.*")
+    octets: list[int] = []
+    for part in parts[:first_wildcard]:
+        if not part.isdigit() or not 0 <= int(part) <= 255:
+            raise ValueError(f"invalid IPv4 octet '{part}'")
+        octets.append(int(part))
+    octets.extend([0] * (4 - len(octets)))
+    prefix = first_wildcard * 8
+    return str(ipaddress.ip_network(f"{'.'.join(str(part) for part in octets)}/{prefix}", strict=False))
+
+
+BYPASS_RULE_TYPES = {
+    "ip_cidr",
+    "domain",
+    "domain_prefix",
+    "domain_suffix",
+    "domain_keyword",
+    "domain_regex",
+}
+
+
+def normalize_bypass_rule(raw: object) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise ValueError("rule must be an object")
+    rule_type = str(raw.get("type") or "").strip().lower()
+    value = str(raw.get("value") or "").strip()
+    if rule_type not in BYPASS_RULE_TYPES:
+        raise ValueError(f"unsupported rule type '{rule_type}'")
+    if not value:
+        raise ValueError("rule value cannot be empty")
+
+    if rule_type == "ip_cidr":
+        value = normalize_bypass_cidr(value)
+    elif rule_type in {"domain", "domain_suffix"}:
+        domain = normalize_bypass_domain(value)
+        if not domain:
+            raise ValueError("invalid domain")
+        value = domain.lstrip(".")
+    elif rule_type in {"domain_prefix", "domain_keyword"}:
+        value = value.lower().rstrip(".")
+    else:
+        try:
+            re.compile(value)
+        except re.error as exc:
+            raise ValueError(f"invalid regular expression: {exc}") from exc
+    if not value:
+        raise ValueError("rule value cannot be empty")
+
+    return {"type": rule_type, "value": value, "invert": bool(raw.get("invert", False))}
+
+
+def sing_box_match_rule(rule: dict[str, Any]) -> dict[str, Any]:
+    rule_type = str(rule["type"])
+    value = str(rule["value"])
+    if rule_type == "domain_prefix":
+        match = {"domain_regex": ["^" + re.escape(value)]}
+    else:
+        match = {rule_type: [value]}
+    if rule.get("invert"):
+        match["invert"] = True
+    return match
 
 
 def get_apt_source_domains(apt_dir: Path = APT_DIR) -> list[str]:
@@ -345,7 +428,7 @@ def normalize_config(raw: dict[str, Any]) -> dict[str, Any]:
     validated_cidrs: list[str] = []
     for cidr in bypass_cidrs:
         try:
-            validated_cidrs.append(str(ipaddress.ip_network(cidr, strict=False)))
+            validated_cidrs.append(normalize_bypass_cidr(cidr))
         except ValueError as exc:
             raise GatewayError(f"Invalid bypass CIDR '{cidr}': {exc}") from exc
 
@@ -359,6 +442,12 @@ def normalize_config(raw: dict[str, Any]) -> dict[str, Any]:
         domain = normalize_bypass_domain(str(item))
         if domain:
             bypass_domains.append(domain)
+    bypass_rules: list[dict[str, Any]] = []
+    for index, item in enumerate(raw.get("bypass_rules", []), start=1):
+        try:
+            bypass_rules.append(normalize_bypass_rule(item))
+        except ValueError as exc:
+            raise GatewayError(f"Invalid bypass rule #{index}: {exc}") from exc
     local_dns = get_system_dns_server()
 
     return {
@@ -370,6 +459,7 @@ def normalize_config(raw: dict[str, Any]) -> dict[str, Any]:
         "apt_source_domains": get_apt_source_domains(),
         "bypass_cidrs": sorted(set(validated_cidrs)),
         "bypass_domains": sorted(set(normalize_bypass_domain(str(domain)) or str(domain) for domain in bypass_domains)),
+        "bypass_rules": bypass_rules,
         "block_udp_when_unsupported": bool(raw.get("block_udp_when_unsupported", False)),
         "bypass_system_packages": bool(raw.get("bypass_system_packages", PRESET_BYPASS_DEFAULTS["bypass_system_packages"])),
         "bypass_container_registries": bool(raw.get("bypass_container_registries", PRESET_BYPASS_DEFAULTS["bypass_container_registries"])),
@@ -397,6 +487,11 @@ def build_sing_box_config(config: dict[str, Any]) -> dict[str, Any]:
             "outbound": "direct",
         },
     ]
+    custom_route_rules = [
+        {**sing_box_match_rule(rule), "outbound": "direct"}
+        for rule in config.get("bypass_rules", [])
+    ]
+    route_rules[1:1] = custom_route_rules
     if config.get("bypass_processes"):
         route_rules.insert(1, {"process_name": config["bypass_processes"], "outbound": "direct"})
     if config.get("block_udp_when_unsupported"):
@@ -411,6 +506,10 @@ def build_sing_box_config(config: dict[str, Any]) -> dict[str, Any]:
                 {"tag": "local-dns", "address": local_dns, "detour": "direct"},
             ],
             "rules": [
+                *[
+                    {**sing_box_match_rule(rule), "server": "local-dns"}
+                    for rule in config.get("bypass_rules", [])
+                ],
                 {
                     "ip_cidr": config["bypass_cidrs"],
                     "server": "local-dns",
@@ -560,7 +659,68 @@ def service_status() -> dict[str, Any]:
         "local_dns": config.get("local_dns") or get_system_dns_server(),
         "apt_source_domains": get_apt_source_domains(),
         "local_cidrs": get_local_ipv4_cidrs(),
+        "bypass_cidrs": list(config.get("bypass_cidrs") or []),
+        "bypass_domains": list(config.get("bypass_domains") or []),
+        "bypass_rules": list(config.get("bypass_rules") or []),
     }
+
+
+def split_destination(value: str) -> tuple[str, int | None]:
+    host, separator, port_text = value.rpartition(":")
+    if not separator:
+        return value.strip("[]"), None
+    try:
+        return host.strip("[]"), int(port_text)
+    except ValueError:
+        return value.strip("[]"), None
+
+
+def parse_traffic_logs(content: str, proxy_target: str | None = None) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for raw_line in content.splitlines():
+        line = ANSI_ESCAPE_RE.sub("", raw_line)
+        match = TRAFFIC_LOG_RE.search(line)
+        if not match:
+            continue
+        destination, port = split_destination(match.group("destination"))
+        route = match.group("route")
+        entries.append({
+            "time": match.group("timestamp"),
+            "destination": destination,
+            "port": port,
+            "network": "udp" if match.group("packet") else "tcp",
+            "route": route,
+            "outbound_type": match.group("outbound_type"),
+            "via": proxy_target if route == "proxy" else route,
+            "connection_id": match.group("connection_id"),
+        })
+    entries.reverse()
+    return entries
+
+
+def traffic_logs(limit: int = 300) -> dict[str, Any]:
+    limit = max(1, min(limit, 2000))
+    config = read_json(SYSTEM_CONFIG) if SYSTEM_CONFIG.exists() else {}
+    proxy_target = None
+    if config.get("proxy_host"):
+        proxy_target = f"{config['proxy_host']}:{config.get('proxy_port') or DEFAULT_PORT}"
+    result = run(
+        [
+            "journalctl",
+            "-u",
+            "vm-proxy-gateway.service",
+            "--no-pager",
+            "--no-hostname",
+            "--output=cat",
+            "--grep=outbound/",
+            f"--lines={limit}",
+        ],
+        check=False,
+    )
+    if result.returncode != 0:
+        raise GatewayError(result.stderr.strip() or "Could not read service logs.")
+    entries = parse_traffic_logs(result.stdout, proxy_target)
+    return {"entries": entries, "proxy_target": proxy_target, "count": len(entries)}
 
 
 def test_network(config_path: Path | None = None) -> dict[str, Any]:
@@ -672,6 +832,8 @@ def main() -> int:
     p_apply_start.add_argument("--config", required=True, type=Path)
     for name in ["start", "stop", "restart", "status", "discover", "uninstall"]:
         sub.add_parser(name)
+    p_logs = sub.add_parser("logs")
+    p_logs.add_argument("--limit", type=int, default=300)
     p_test = sub.add_parser("test")
     p_test.add_argument("--config", type=Path)
     p_diagnose = sub.add_parser("diagnose")
@@ -690,6 +852,8 @@ def main() -> int:
             print(f"Service {args.command} complete.")
         elif args.command == "status":
             print(json.dumps(service_status(), indent=2, sort_keys=True))
+        elif args.command == "logs":
+            print(json.dumps(traffic_logs(args.limit), indent=2, sort_keys=True))
         elif args.command == "test":
             print(json.dumps(test_network(args.config), indent=2, sort_keys=True))
         elif args.command == "diagnose":

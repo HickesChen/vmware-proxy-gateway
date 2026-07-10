@@ -20,7 +20,7 @@ VM Proxy Gateway creates a transparent TUN proxy on the Ubuntu side and sends
 normal VM TCP/DNS traffic to the Windows-hosted proxy, for example:
 
 ```text
-Windows host proxy: <host-ip>:10086
+Windows host proxy: <host-ip>:<port>
 Ubuntu VM traffic:  transparent TUN proxy through sing-box
 ```
 
@@ -45,6 +45,8 @@ development traffic that ordinary proxy configuration cannot reliably catch.
 - Provides preset bypass switches for traffic that is often better left direct,
   such as APT/Snap/Flatpak system package downloads and optional container image
   registries.
+- Provides a dedicated traffic log page with destination, port, and proxy/direct
+  filtering from real sing-box forwarding events.
 - Persists GUI settings under:
 
 ```text
@@ -100,7 +102,7 @@ that fails.
 ## First run
 
 1. Choose **English**, **简体中文**, or **繁體中文** from the language selector.
-2. Enter the Windows host proxy IP and port. The default port is `10086`.
+2. Enter the Windows host proxy IP and a port that matches your Windows proxy setup.
 3. Leave protocol as `auto` unless you know it is HTTP only.
 4. Click **Save** / **保存** / **儲存**.
 5. Click **Apply** / **应用** / **套用**.
@@ -124,7 +126,7 @@ reopening the main window.
 
 The **Test** action checks two things:
 
-- whether `<host-ip>:10086` accepts TCP connections;
+- whether `<host-ip>:<port>` accepts TCP connections;
 - whether HTTPS traffic can reach the internet through the proxy.
 
 For SOCKS5, the test uses `socks5h`, so DNS resolution happens through the
@@ -139,7 +141,7 @@ blocks ICMP, so `ping <host-ip>` can fail even when the proxy TCP port works.
 Test the proxy port instead:
 
 ```bash
-nc -vz <host-ip> 10086
+nc -vz <host-ip> <port>
 ```
 
 Or use the built-in diagnosis:
@@ -159,11 +161,11 @@ Ubuntu VMs have no usable IPv6 route even when DNS returns IPv6 records. A
 failed `ping -6` usually means IPv6 is unavailable in the VM, not that the
 Windows proxy is broken.
 
-If TCP port `10086` is unreachable from Ubuntu, check the Windows proxy app:
+If the configured TCP port is unreachable from Ubuntu, check the Windows proxy app:
 
 - Enable LAN access / allow LAN.
 - Bind the proxy to `0.0.0.0` or the Windows LAN/VMware IP, not only `127.0.0.1`.
-- Allow inbound TCP `10086` in Windows Defender Firewall on the private network.
+- Allow inbound TCP on the configured port in Windows Defender Firewall on the private network.
 
 ## Bypass rules
 
@@ -179,14 +181,27 @@ The tool always adds protective bypass rules for:
   - `172.16.0.0/12`
   - `192.168.0.0/16`
 
-You can add your own CIDRs or IPs in the GUI, one per line:
+The GUI keeps custom bypass rules in one table. Use **Add rule** to choose IP / CIDR,
+exact domain, domain prefix, domain suffix, keyword, or regular-expression matching.
+Rules can also be inverted. Existing CIDR and domain entries from older versions are
+merged into this table automatically.
+The table also shows read-only system protection, current proxy, default gateway,
+VM-local address/subnet, and applied preset rules alongside editable custom rules.
+
+IP / CIDR rules accept values such as:
 
 ```text
 192.168.88.0/24
 192.168.88.20/32
+192.168.10.*
+10.*.*.*
 ```
 
-You can add domains or suffixes, one per line:
+IPv4 wildcards must cover complete trailing octets. For example,
+`192.168.*.*` is equivalent to `192.168.0.0/16`; a discontinuous pattern such
+as `192.*.1.*` is rejected.
+
+Domain rules accept values such as:
 
 ```text
 nas.local
@@ -225,6 +240,7 @@ to help route through the Windows proxy.
 ```bash
 vm-proxy-gateway discover
 vm-proxy-gateway status
+vm-proxy-gateway logs --limit 300
 vm-proxy-gateway diagnose --config ~/.config/vm-proxy-gateway/config.json
 vm-proxy-gateway test --config ~/.config/vm-proxy-gateway/config.json
 sudo vm-proxy-gateway apply --config ~/.config/vm-proxy-gateway/config.json
@@ -266,7 +282,7 @@ This repository includes:
 
 - This first version targets Ubuntu VMs and assumes `systemd`.
 - TCP and DNS are the main supported traffic classes.
-- UDP support depends on the upstream proxy at `host:10086`.
+- UDP support depends on the upstream proxy at `host:<port>`.
 - If your Windows proxy only listens on `127.0.0.1`, the Ubuntu VM cannot use it.
   Configure the Windows proxy to listen on a VM-reachable host IP.
 

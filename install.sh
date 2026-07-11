@@ -64,10 +64,10 @@ install_packages() {
   fi
 
   if command -v apt-get >/dev/null 2>&1; then
-    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y python3-tk python3-pil python3-pip gir1.2-ayatanaappindicator3-0.1 curl ca-certificates unzip; then
+    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y python3-tk python3-pil python3-pip gir1.2-ayatanaappindicator3-0.1 curl ca-certificates unzip nftables; then
       echo "Dependency installation failed. Refreshing APT metadata once, then retrying..."
       apt-get update
-      DEBIAN_FRONTEND=noninteractive apt-get install -y python3-tk python3-pil python3-pip gir1.2-ayatanaappindicator3-0.1 curl ca-certificates unzip
+      DEBIAN_FRONTEND=noninteractive apt-get install -y python3-tk python3-pil python3-pip gir1.2-ayatanaappindicator3-0.1 curl ca-certificates unzip nftables
     fi
   else
     echo "apt-get was not found. Install python3-tk, python3-pil, python3-pip, gir1.2-ayatanaappindicator3-0.1, curl, ca-certificates, and unzip manually." >&2
@@ -202,6 +202,7 @@ install_sudoers() {
 %sudo ALL=(root) NOPASSWD: /usr/bin/python3 /opt/vm-proxy-gateway/vm_proxy_gateway.py start
 %sudo ALL=(root) NOPASSWD: /usr/bin/python3 /opt/vm-proxy-gateway/vm_proxy_gateway.py stop
 %sudo ALL=(root) NOPASSWD: /usr/bin/python3 /opt/vm-proxy-gateway/vm_proxy_gateway.py restart
+%sudo ALL=(root) NOPASSWD: /usr/bin/python3 /opt/vm-proxy-gateway/vm_proxy_gateway.py traffic-stats
 %sudo ALL=(root) NOPASSWD: /usr/bin/python3 /opt/vm-proxy-gateway/vm_proxy_gateway.py uninstall
 EOF
   chmod 0440 "${SUDOERS_FILE}"

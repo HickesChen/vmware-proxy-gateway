@@ -15,6 +15,7 @@ import json
 import os
 import pwd
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -29,6 +30,8 @@ SYSTEM_CONFIG = SYSTEM_DIR / "config.json"
 SING_BOX_CONFIG = SYSTEM_DIR / "sing-box.json"
 SYSTEMD_UNIT = Path("/etc/systemd/system/vm-proxy-gateway.service")
 TUN_INTERFACE = "vmproxy0"
+TRAFFIC_TABLE_FAMILY = "inet"
+TRAFFIC_TABLE_NAME = "vm_proxy_gateway_stats"
 APT_DIR = Path("/etc/apt")
 SING_BOX_BIN = "/usr/local/bin/sing-box"
 DEFAULT_PORT = 10086
@@ -382,6 +385,56 @@ def tcp_connect(host: str, port: int, timeout: float = 3.0) -> tuple[bool, str]:
         return False, str(exc)
 
 
+def resolve_proxy_addresses(host: str, port: int) -> list[str]:
+    try:
+        addresses = {
+            item[4][0]
+            for item in socket.getaddrinfo(host.strip("[]"), port, type=socket.SOCK_STREAM)
+        }
+    except socket.gaierror as exc:
+        raise GatewayError(f"Could not resolve proxy host {host}: {exc}") from exc
+    return sorted(addresses, key=lambda value: (ipaddress.ip_address(value).version, value))
+
+
+def build_proxy_traffic_nft_script(addresses: list[str], port: int) -> str:
+    lines = [
+        f"delete table {TRAFFIC_TABLE_FAMILY} {TRAFFIC_TABLE_NAME}",
+        f"table {TRAFFIC_TABLE_FAMILY} {TRAFFIC_TABLE_NAME} {{",
+        " chain input { type filter hook input priority filter; policy accept;",
+    ]
+    for address in addresses:
+        family = "ip6" if ipaddress.ip_address(address).version == 6 else "ip"
+        for protocol in ("tcp", "udp"):
+            lines.append(
+                f'  {family} saddr {address} {protocol} sport {port} counter comment "download"'
+            )
+    lines.extend([" }", " chain output { type filter hook output priority filter; policy accept;"])
+    for address in addresses:
+        family = "ip6" if ipaddress.ip_address(address).version == 6 else "ip"
+        for protocol in ("tcp", "udp"):
+            lines.append(
+                f'  {family} daddr {address} {protocol} dport {port} counter comment "upload"'
+            )
+    lines.extend([" }", "}"])
+    return "\n".join(lines) + "\n"
+
+
+def configure_proxy_traffic_accounting(host: str, port: int) -> None:
+    require_root()
+    if not shutil.which("nft"):
+        raise GatewayError("nft is required for complete proxy traffic monitoring.")
+    addresses = resolve_proxy_addresses(host, port)
+    script = build_proxy_traffic_nft_script(addresses, port)
+    # `destroy` is atomic with the replacement but fails when the table does
+    # not exist, so ensure an empty table exists first.
+    run(["nft", "add", "table", TRAFFIC_TABLE_FAMILY, TRAFFIC_TABLE_NAME], check=False)
+    result = subprocess.run(
+        ["nft", "-f", "-"], input=script, text=True, capture_output=True
+    )
+    if result.returncode != 0:
+        raise GatewayError(result.stderr.strip() or "Could not configure proxy traffic monitoring.")
+
+
 def detect_proxy_protocol(host: str, port: int) -> str:
     ok, err = tcp_connect(host, port)
     if not ok:
@@ -598,9 +651,12 @@ def apply_config(config_path: Path, restart_active: bool = False) -> None:
     SYSTEM_DIR.mkdir(parents=True, exist_ok=True)
     write_json(SYSTEM_CONFIG, config)
     write_json(SING_BOX_CONFIG, build_sing_box_config(config))
+    configure_proxy_traffic_accounting(config["proxy_host"], int(config["proxy_port"]))
     write_systemd_unit()
     run(["systemctl", "daemon-reload"])
-    run(["systemctl", "enable", "vm-proxy-gateway.service"])
+    # Login startup is managed by the GUI so startup failures can be shown to
+    # the user. Keep the system service from starting silently before login.
+    run(["systemctl", "disable", "vm-proxy-gateway.service"])
     if restart_active and is_service_active():
         cleanup_runtime_network_state()
         run(["systemctl", "restart", "vm-proxy-gateway.service"])
@@ -667,23 +723,23 @@ def service_status() -> dict[str, Any]:
 
 
 def traffic_stats() -> dict[str, Any]:
-    """Return byte counters for traffic crossing the transparent proxy TUN."""
-    statistics = Path("/sys/class/net") / TUN_INTERFACE / "statistics"
-
-    def read_counter(name: str) -> int:
-        try:
-            return int((statistics / name).read_text(encoding="ascii").strip())
-        except (OSError, ValueError):
-            return 0
-
-    active = is_service_active()
-    available = active and statistics.is_dir()
+    """Return all VM traffic exchanged with the configured proxy endpoint."""
+    require_root()
+    result = run(["nft", "list", "table", TRAFFIC_TABLE_FAMILY, TRAFFIC_TABLE_NAME], check=False)
+    if result.returncode != 0:
+        return {"available": False, "upload_bytes": 0, "download_bytes": 0}
+    totals = {"upload": 0, "download": 0}
+    pattern = re.compile(r'counter packets \d+ bytes (?P<bytes>\d+) comment "(?P<direction>upload|download)"')
+    for match in pattern.finditer(result.stdout):
+        totals[match.group("direction")] += int(match.group("bytes"))
+    config = read_json(SYSTEM_CONFIG) if SYSTEM_CONFIG.exists() else {}
     return {
-        "active": active,
-        "interface": TUN_INTERFACE,
-        "available": available,
-        "upload_bytes": read_counter("tx_bytes") if available else 0,
-        "download_bytes": read_counter("rx_bytes") if available else 0,
+        "available": True,
+        "source": "proxy_endpoint",
+        "proxy_host": config.get("proxy_host"),
+        "proxy_port": config.get("proxy_port"),
+        "upload_bytes": totals["upload"],
+        "download_bytes": totals["download"],
     }
 
 
@@ -839,6 +895,7 @@ def discover() -> dict[str, Any]:
 def uninstall() -> None:
     require_root()
     run(["systemctl", "disable", "--now", "vm-proxy-gateway.service"], check=False)
+    run(["nft", "delete", "table", TRAFFIC_TABLE_FAMILY, TRAFFIC_TABLE_NAME], check=False)
     if SYSTEMD_UNIT.exists():
         SYSTEMD_UNIT.unlink()
     run(["systemctl", "daemon-reload"], check=False)

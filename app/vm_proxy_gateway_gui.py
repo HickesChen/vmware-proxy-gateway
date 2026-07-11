@@ -37,6 +37,7 @@ APP_NAME = "VM Proxy Gateway"
 USER_CONFIG = Path.home() / ".config" / "vm-proxy-gateway" / "config.json"
 LOCK_FILE = Path.home() / ".config" / "vm-proxy-gateway" / "gui.lock"
 CONTROLLER = Path("/opt/vm-proxy-gateway/vm_proxy_gateway.py")
+AUTOSTART_FILE = Path.home() / ".config" / "autostart" / "vm-proxy-gateway.desktop"
 ICON_NAME = "vm-proxy-gateway.png"
 TRAY_ACTIVE_COLOR_DARK = (151, 84, 0)
 TRAY_ACTIVE_COLOR_LIGHT = (255, 186, 59)
@@ -50,6 +51,8 @@ DEFAULT_CONFIG = {
     "block_udp_when_unsupported": False,
     "bypass_system_packages": True,
     "bypass_container_registries": False,
+    "autostart_app": False,
+    "autostart_proxy": False,
     "language": "zh_CN",
 }
 LANGUAGES = {
@@ -153,6 +156,8 @@ TEXT = {
         "bypass_domains_placeholder": "example.com\n.corp.local\n*.internal.lan",
         "bypass_system_packages": "Bypass system package downloads (APT / Snap / Flatpak)",
         "bypass_container_registries": "Bypass container image registries (Docker / Podman)",
+        "autostart_app": "Open the app automatically after login",
+        "autostart_proxy": "Automatically turn on the proxy",
         "status_not_checked": "Status: not checked",
         "status_saved": "Status: saved to {path}",
         "status_not_installed": "Status: not installed under /opt/vm-proxy-gateway",
@@ -315,6 +320,8 @@ TEXT = {
         "bypass_domains_placeholder": "example.com\n.corp.local\n*.internal.lan",
         "bypass_system_packages": "绕过系统包下载（APT / Snap / Flatpak）",
         "bypass_container_registries": "绕过容器镜像仓库（Docker / Podman）",
+        "autostart_app": "登录后自动打开软件",
+        "autostart_proxy": "自动开启代理",
         "status_not_checked": "状态：未检查",
         "status_saved": "状态：已保存到 {path}",
         "status_not_installed": "状态：未安装到 /opt/vm-proxy-gateway",
@@ -477,6 +484,8 @@ TEXT = {
         "bypass_domains_placeholder": "example.com\n.corp.local\n*.internal.lan",
         "bypass_system_packages": "略過系統套件下載（APT / Snap / Flatpak）",
         "bypass_container_registries": "略過容器映像倉庫（Docker / Podman）",
+        "autostart_app": "登入後自動開啟軟體",
+        "autostart_proxy": "自動開啟代理",
         "status_not_checked": "狀態：尚未檢查",
         "status_saved": "狀態：已儲存到 {path}",
         "status_not_installed": "狀態：尚未安裝到 /opt/vm-proxy-gateway",
@@ -601,6 +610,26 @@ def save_config(config: dict) -> None:
         json.dump(config, f, indent=2, sort_keys=True, ensure_ascii=False)
         f.write("\n")
     tmp.replace(USER_CONFIG)
+
+
+def configure_app_autostart(enabled: bool) -> None:
+    if not enabled:
+        AUTOSTART_FILE.unlink(missing_ok=True)
+        return
+    AUTOSTART_FILE.parent.mkdir(parents=True, exist_ok=True)
+    content = """[Desktop Entry]
+Type=Application
+Name=VM Proxy Gateway
+Comment=Transparent proxy controller for Ubuntu virtual machines
+Exec=/usr/local/bin/vm-proxy-gateway-gui --autostart
+Icon=vm-proxy-gateway
+Terminal=false
+X-GNOME-Autostart-enabled=true
+StartupWMClass=VmProxyGateway
+"""
+    tmp = AUTOSTART_FILE.with_suffix(".tmp")
+    tmp.write_text(content, encoding="utf-8")
+    tmp.replace(AUTOSTART_FILE)
 
 
 def find_asset(name: str) -> Path | None:
@@ -806,6 +835,10 @@ class App(tk.Tk):
         self.block_udp = tk.BooleanVar(value=bool(self.config_data.get("block_udp_when_unsupported", False)))
         self.bypass_system_packages = tk.BooleanVar(value=bool(self.config_data.get("bypass_system_packages", True)))
         self.bypass_container_registries = tk.BooleanVar(value=bool(self.config_data.get("bypass_container_registries", False)))
+        self.autostart_app = tk.BooleanVar(value=bool(self.config_data.get("autostart_app", False)))
+        self.autostart_proxy = tk.BooleanVar(
+            value=bool(self.config_data.get("autostart_app", False) and self.config_data.get("autostart_proxy", False))
+        )
         language = str(self.config_data.get("language") or "zh_CN")
         if language not in LANGUAGES:
             language = "zh_CN"
@@ -856,6 +889,8 @@ class App(tk.Tk):
         self.start_tray()
         self.refresh_status()
         self._schedule_speed_refresh(immediate=True)
+        if "--autostart" in sys.argv and self.autostart_app.get() and self.autostart_proxy.get():
+            self.after(800, self._autostart_proxy)
 
     def tr(self, key: str, **kwargs: object) -> str:
         text = TEXT[self.language_code][key]
@@ -933,6 +968,13 @@ class App(tk.Tk):
         self._check(options, "block_udp", self.block_udp).grid(row=0, column=0, sticky="w", pady=(0, 8))
         self._check(options, "bypass_system_packages", self.bypass_system_packages).grid(row=1, column=0, sticky="w", pady=8)
         self._check(options, "bypass_container_registries", self.bypass_container_registries).grid(row=2, column=0, sticky="w", pady=8)
+        self._check(options, "autostart_app", self.autostart_app, command=self._update_autostart_controls).grid(
+            row=3, column=0, sticky="w", pady=(12, 4)
+        )
+        self._check(options, "autostart_proxy", self.autostart_proxy).grid(
+            row=4, column=0, sticky="w", padx=(24, 0), pady=(4, 0)
+        )
+        self._update_autostart_controls()
 
         actions = ttk.Frame(control_page, style="Page.TFrame")
         actions.grid(row=1, column=0, sticky="ew", pady=(0, 12))
@@ -1804,7 +1846,7 @@ class App(tk.Tk):
 
     def _refresh_speed(self) -> None:
         self._speed_refresh_job = None
-        result = run_controller("traffic-stats")
+        result = run_controller("traffic-stats", privileged=True)
         data = self._json_from_result(result) if result.returncode == 0 else None
         now = time.monotonic()
         if not data or not data.get("available"):
@@ -2002,8 +2044,18 @@ class App(tk.Tk):
             "block_udp_when_unsupported": self.block_udp.get(),
             "bypass_system_packages": self.bypass_system_packages.get(),
             "bypass_container_registries": self.bypass_container_registries.get(),
+            "autostart_app": self.autostart_app.get(),
+            "autostart_proxy": self.autostart_app.get() and self.autostart_proxy.get(),
             "language": self.language_code,
         }
+
+    def _update_autostart_controls(self) -> None:
+        enabled = self.autostart_app.get()
+        if not enabled:
+            self.autostart_proxy.set(False)
+        check = self._checks.get("autostart_proxy")
+        if check is not None:
+            check.configure(state="normal" if enabled else "disabled")
 
     def log(self, title: str, result: subprocess.CompletedProcess[str] | str, kind: str = "plain") -> None:
         content = self.format_result(kind, result)
@@ -2055,7 +2107,9 @@ class App(tk.Tk):
 
     def save(self, silent: bool = False) -> bool:
         try:
-            save_config(self.current_config())
+            config = self.current_config()
+            save_config(config)
+            configure_app_autostart(bool(config["autostart_app"]))
         except Exception as exc:
             messagebox.showerror(APP_NAME, str(exc))
             return False
@@ -2080,9 +2134,15 @@ class App(tk.Tk):
         self.refresh_status(notify=False)
         return True
 
-    def turn_on(self) -> None:
+    def _autostart_proxy(self) -> None:
+        if self.turn_on():
+            # Starting a service can succeed even when the configured upstream
+            # address is unreachable. Verify it and show the detailed warning.
+            self.after(300, self.test)
+
+    def turn_on(self) -> bool:
         if not self.save():
-            return
+            return False
         self._set_button_busy("turn_on", "starting")
         try:
             result = run_controller("apply-start", privileged=True, extra=["--config", str(USER_CONFIG)])
@@ -2093,9 +2153,10 @@ class App(tk.Tk):
             self.maybe_notify_tray_action(ok=False)
             if not self._tray_action_title:
                 messagebox.showerror(APP_NAME, self._last_log_content)
-            return
+            return False
         self.maybe_notify_tray_action()
         self.refresh_status(notify=False)
+        return True
 
     def turn_off(self) -> None:
         self._set_button_busy("turn_off", "stopping")

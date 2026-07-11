@@ -203,25 +203,47 @@ def test_traffic_log_parser() -> None:
 
 
 def test_traffic_stats_and_speed_format() -> None:
-    old_interface = ctl.TUN_INTERFACE
-    old_active = ctl.is_service_active
-    with tempfile.TemporaryDirectory() as tmp:
-        statistics = Path(tmp) / "statistics"
-        statistics.mkdir()
-        (statistics / "tx_bytes").write_text("4096\n", encoding="ascii")
-        (statistics / "rx_bytes").write_text("8192\n", encoding="ascii")
-        ctl.TUN_INTERFACE = tmp
-        ctl.is_service_active = lambda: True
-        try:
-            stats = ctl.traffic_stats()
-        finally:
-            ctl.TUN_INTERFACE = old_interface
-            ctl.is_service_active = old_active
+    old_run = ctl.run
+    old_root = ctl.is_root
+    old_config = ctl.SYSTEM_CONFIG
+    ctl.is_root = lambda: True
+    ctl.SYSTEM_CONFIG = Path("/tmp/nonexistent-vm-proxy-config")
+    ctl.run = lambda cmd, check=True: FakeResult(
+        'counter packets 4 bytes 4096 comment "upload"\n'
+        'counter packets 8 bytes 8192 comment "download"\n'
+    )
+    try:
+        stats = ctl.traffic_stats()
+    finally:
+        ctl.run = old_run
+        ctl.is_root = old_root
+        ctl.SYSTEM_CONFIG = old_config
     assert stats["available"] is True
     assert stats["upload_bytes"] == 4096
     assert stats["download_bytes"] == 8192
     assert gui.App._format_speed(0) == "0 B/s"
     assert gui.App._format_speed(1536) == "1.5 KB/s"
+
+    script = ctl.build_proxy_traffic_nft_script(["192.0.2.10", "2001:db8::10"], 10086)
+    assert "ip daddr 192.0.2.10 tcp dport 10086" in script
+    assert "ip6 saddr 2001:db8::10 udp sport 10086" in script
+    assert script.count('comment "upload"') == 4
+    assert script.count('comment "download"') == 4
+
+
+def test_app_autostart_desktop_entry() -> None:
+    old_autostart = gui.AUTOSTART_FILE
+    with tempfile.TemporaryDirectory() as tmp:
+        gui.AUTOSTART_FILE = Path(tmp) / "autostart" / "vm-proxy-gateway.desktop"
+        try:
+            gui.configure_app_autostart(True)
+            content = gui.AUTOSTART_FILE.read_text(encoding="utf-8")
+            assert "--autostart" in content
+            assert "X-GNOME-Autostart-enabled=true" in content
+            gui.configure_app_autostart(False)
+            assert not gui.AUTOSTART_FILE.exists()
+        finally:
+            gui.AUTOSTART_FILE = old_autostart
 
 
 def test_gui_log_keeps_popup_content() -> None:
@@ -342,6 +364,7 @@ def test_apply_restarts_active_service() -> None:
     old_system_config = ctl.SYSTEM_CONFIG
     old_sing_box_config = ctl.SING_BOX_CONFIG
     old_unit = ctl.SYSTEMD_UNIT
+    old_accounting = ctl.configure_proxy_traffic_accounting
     ctl.run = fake_run
     ctl.is_root = lambda: True
     ctl.normalize_config = lambda raw: {
@@ -358,6 +381,7 @@ def test_apply_restarts_active_service() -> None:
         "bypass_container_registries": False,
         "apt_source_domains": [],
     }
+    ctl.configure_proxy_traffic_accounting = lambda host, port: calls.append(["accounting", host, str(port)])
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         ctl.SYSTEM_DIR = root / "etc"
@@ -369,6 +393,7 @@ def test_apply_restarts_active_service() -> None:
         try:
             ctl.apply_config(config_path, restart_active=True)
             assert ["systemctl", "restart", "vm-proxy-gateway.service"] in calls
+            assert ["systemctl", "disable", "vm-proxy-gateway.service"] in calls
         finally:
             ctl.run = old_run
             ctl.is_root = old_is_root
@@ -377,6 +402,7 @@ def test_apply_restarts_active_service() -> None:
             ctl.SYSTEM_CONFIG = old_system_config
             ctl.SING_BOX_CONFIG = old_sing_box_config
             ctl.SYSTEMD_UNIT = old_unit
+            ctl.configure_proxy_traffic_accounting = old_accounting
 
 
 def test_single_instance_lock() -> None:
@@ -458,6 +484,7 @@ def main() -> int:
         ("wildcard_cidr_validation", test_wildcard_cidr_validation),
         ("traffic_log_parser", test_traffic_log_parser),
         ("traffic_stats_and_speed_format", test_traffic_stats_and_speed_format),
+        ("app_autostart_desktop_entry", test_app_autostart_desktop_entry),
         ("gui_log_keeps_popup_content", test_gui_log_keeps_popup_content),
         ("gui_effective_rules_include_protection", test_gui_effective_rules_include_protection),
         ("gui_traffic_block_filter_and_sort", test_gui_traffic_block_filter_and_sort),

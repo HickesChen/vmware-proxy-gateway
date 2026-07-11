@@ -28,6 +28,7 @@ SYSTEM_DIR = Path("/etc/vm-proxy-gateway")
 SYSTEM_CONFIG = SYSTEM_DIR / "config.json"
 SING_BOX_CONFIG = SYSTEM_DIR / "sing-box.json"
 SYSTEMD_UNIT = Path("/etc/systemd/system/vm-proxy-gateway.service")
+TUN_INTERFACE = "vmproxy0"
 APT_DIR = Path("/etc/apt")
 SING_BOX_BIN = "/usr/local/bin/sing-box"
 DEFAULT_PORT = 10086
@@ -665,6 +666,27 @@ def service_status() -> dict[str, Any]:
     }
 
 
+def traffic_stats() -> dict[str, Any]:
+    """Return byte counters for traffic crossing the transparent proxy TUN."""
+    statistics = Path("/sys/class/net") / TUN_INTERFACE / "statistics"
+
+    def read_counter(name: str) -> int:
+        try:
+            return int((statistics / name).read_text(encoding="ascii").strip())
+        except (OSError, ValueError):
+            return 0
+
+    active = is_service_active()
+    available = active and statistics.is_dir()
+    return {
+        "active": active,
+        "interface": TUN_INTERFACE,
+        "available": available,
+        "upload_bytes": read_counter("tx_bytes") if available else 0,
+        "download_bytes": read_counter("rx_bytes") if available else 0,
+    }
+
+
 def split_destination(value: str) -> tuple[str, int | None]:
     host, separator, port_text = value.rpartition(":")
     if not separator:
@@ -830,7 +852,7 @@ def main() -> int:
     p_apply.add_argument("--config", required=True, type=Path)
     p_apply_start = sub.add_parser("apply-start")
     p_apply_start.add_argument("--config", required=True, type=Path)
-    for name in ["start", "stop", "restart", "status", "discover", "uninstall"]:
+    for name in ["start", "stop", "restart", "status", "traffic-stats", "discover", "uninstall"]:
         sub.add_parser(name)
     p_logs = sub.add_parser("logs")
     p_logs.add_argument("--limit", type=int, default=300)
@@ -852,6 +874,8 @@ def main() -> int:
             print(f"Service {args.command} complete.")
         elif args.command == "status":
             print(json.dumps(service_status(), indent=2, sort_keys=True))
+        elif args.command == "traffic-stats":
+            print(json.dumps(traffic_stats(), indent=2, sort_keys=True))
         elif args.command == "logs":
             print(json.dumps(traffic_logs(args.limit), indent=2, sort_keys=True))
         elif args.command == "test":

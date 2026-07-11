@@ -202,6 +202,28 @@ def test_traffic_log_parser() -> None:
     assert entries[0]["network"] == "udp"
 
 
+def test_traffic_stats_and_speed_format() -> None:
+    old_interface = ctl.TUN_INTERFACE
+    old_active = ctl.is_service_active
+    with tempfile.TemporaryDirectory() as tmp:
+        statistics = Path(tmp) / "statistics"
+        statistics.mkdir()
+        (statistics / "tx_bytes").write_text("4096\n", encoding="ascii")
+        (statistics / "rx_bytes").write_text("8192\n", encoding="ascii")
+        ctl.TUN_INTERFACE = tmp
+        ctl.is_service_active = lambda: True
+        try:
+            stats = ctl.traffic_stats()
+        finally:
+            ctl.TUN_INTERFACE = old_interface
+            ctl.is_service_active = old_active
+    assert stats["available"] is True
+    assert stats["upload_bytes"] == 4096
+    assert stats["download_bytes"] == 8192
+    assert gui.App._format_speed(0) == "0 B/s"
+    assert gui.App._format_speed(1536) == "1.5 KB/s"
+
+
 def test_gui_log_keeps_popup_content() -> None:
     app = object.__new__(gui.App)
     app.language_code = "zh_CN"
@@ -435,6 +457,7 @@ def main() -> int:
         ("normalize_uses_dynamic_apt_sources_and_defaults", test_normalize_uses_dynamic_apt_sources_and_defaults),
         ("wildcard_cidr_validation", test_wildcard_cidr_validation),
         ("traffic_log_parser", test_traffic_log_parser),
+        ("traffic_stats_and_speed_format", test_traffic_stats_and_speed_format),
         ("gui_log_keeps_popup_content", test_gui_log_keeps_popup_content),
         ("gui_effective_rules_include_protection", test_gui_effective_rules_include_protection),
         ("gui_traffic_block_filter_and_sort", test_gui_traffic_block_filter_and_sort),

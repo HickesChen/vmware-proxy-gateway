@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
@@ -128,6 +129,9 @@ TEXT = {
         "confirm": "Confirm",
         "cancel": "Cancel",
         "section_output": "Status and output",
+        "section_speed": "Proxy traffic speed",
+        "upload_speed": "Upload",
+        "download_speed": "Download",
         "tab_control": "Control",
         "tab_rules": "Custom bypass rules",
         "tab_logs": "Traffic logs",
@@ -287,6 +291,9 @@ TEXT = {
         "confirm": "确定",
         "cancel": "取消",
         "section_output": "状态与输出",
+        "section_speed": "代理实时速度",
+        "upload_speed": "上传",
+        "download_speed": "下载",
         "tab_control": "代理控制",
         "tab_rules": "自定义绕过规则",
         "tab_logs": "流量日志",
@@ -446,6 +453,9 @@ TEXT = {
         "confirm": "確定",
         "cancel": "取消",
         "section_output": "狀態與輸出",
+        "section_speed": "代理即時速度",
+        "upload_speed": "上傳",
+        "download_speed": "下載",
         "tab_control": "代理控制",
         "tab_rules": "自訂略過規則",
         "tab_logs": "流量日誌",
@@ -802,6 +812,8 @@ class App(tk.Tk):
         self.language_code = language
         self.language = tk.StringVar(value=LANGUAGES[language])
         self.status_text = tk.StringVar(value=self.tr("status_not_checked"))
+        self.upload_speed = tk.StringVar(value="0 B/s")
+        self.download_speed = tk.StringVar(value="0 B/s")
         self.traffic_search = tk.StringVar(value="")
         self.traffic_route = tk.StringVar(value="all")
         self.auto_refresh_logs = tk.BooleanVar(value=True)
@@ -823,6 +835,8 @@ class App(tk.Tk):
         self._traffic_sort_column = "time"
         self._traffic_sort_reverse = True
         self._log_refresh_job: str | None = None
+        self._speed_refresh_job: str | None = None
+        self._last_traffic_sample: tuple[float, int, int] | None = None
         self._last_status_key = "status_not_checked"
         self._last_status_kwargs: dict[str, object] = {}
         self._last_log_title = APP_NAME
@@ -841,6 +855,7 @@ class App(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self.hide_to_tray)
         self.start_tray()
         self.refresh_status()
+        self._schedule_speed_refresh(immediate=True)
 
     def tr(self, key: str, **kwargs: object) -> str:
         text = TEXT[self.language_code][key]
@@ -928,6 +943,19 @@ class App(tk.Tk):
         self._button(actions, "test", self.test, width=8).pack(side="left", padx=(0, 8))
         self._button(actions, "diagnose", self.diagnose, width=8).pack(side="left", padx=(0, 8))
         self._button(actions, "refresh", self.refresh_status, width=8).pack(side="left")
+
+        speed = self._section(control_page, "section_speed")
+        speed.grid(row=2, column=0, sticky="ew", pady=(0, 12))
+        speed.columnconfigure(1, weight=1)
+        speed.columnconfigure(3, weight=1)
+        self._label(speed, "upload_speed", style="Field.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(speed, textvariable=self.upload_speed, style="Field.TLabel").grid(
+            row=0, column=1, sticky="w", padx=(10, 32)
+        )
+        self._label(speed, "download_speed", style="Field.TLabel").grid(row=0, column=2, sticky="w")
+        ttk.Label(speed, textvariable=self.download_speed, style="Field.TLabel").grid(
+            row=0, column=3, sticky="w", padx=(10, 0)
+        )
 
         self._build_rules_page(rules_page)
         self._build_logs_page(logs_page)
@@ -1756,6 +1784,44 @@ class App(tk.Tk):
         self._last_status_kwargs = kwargs
         self.status_text.set(self.tr(key, **kwargs))
 
+    @staticmethod
+    def _format_speed(bytes_per_second: float) -> str:
+        value = max(0.0, bytes_per_second)
+        for unit in ("B/s", "KB/s", "MB/s", "GB/s"):
+            if value < 1024.0 or unit == "GB/s":
+                return f"{value:.0f} {unit}" if unit == "B/s" else f"{value:.1f} {unit}"
+            value /= 1024.0
+        return "0 B/s"
+
+    def _schedule_speed_refresh(self, immediate: bool = False) -> None:
+        if self._speed_refresh_job is not None:
+            self.after_cancel(self._speed_refresh_job)
+            self._speed_refresh_job = None
+        if immediate:
+            self._refresh_speed()
+        else:
+            self._speed_refresh_job = self.after(1000, self._refresh_speed)
+
+    def _refresh_speed(self) -> None:
+        self._speed_refresh_job = None
+        result = run_controller("traffic-stats")
+        data = self._json_from_result(result) if result.returncode == 0 else None
+        now = time.monotonic()
+        if not data or not data.get("available"):
+            self._last_traffic_sample = None
+            self.upload_speed.set("0 B/s")
+            self.download_speed.set("0 B/s")
+        else:
+            upload = int(data.get("upload_bytes") or 0)
+            download = int(data.get("download_bytes") or 0)
+            if self._last_traffic_sample is not None:
+                previous_time, previous_upload, previous_download = self._last_traffic_sample
+                elapsed = max(now - previous_time, 0.001)
+                self.upload_speed.set(self._format_speed((upload - previous_upload) / elapsed))
+                self.download_speed.set(self._format_speed((download - previous_download) / elapsed))
+            self._last_traffic_sample = (now, upload, download)
+        self._schedule_speed_refresh()
+
     def _update_effective_rule_context(self, data: dict) -> None:
         if "bypass_cidrs" in data:
             self._effective_cidrs = set(PROTECTIVE_BYPASS_CIDRS)
@@ -2007,7 +2073,7 @@ class App(tk.Tk):
             self._restore_button("apply")
         self.log(self.tr("log_apply"), result, kind="apply")
         if result.returncode != 0:
-            messagebox.showerror(APP_NAME, self.tr("apply_failed"))
+            messagebox.showerror(APP_NAME, self._last_log_content or self.tr("apply_failed"))
             self.maybe_notify_tray_action(ok=False)
             return False
         self.maybe_notify_tray_action()

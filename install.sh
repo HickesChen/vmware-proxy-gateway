@@ -203,6 +203,7 @@ install_sudoers() {
 %sudo ALL=(root) NOPASSWD: /usr/bin/python3 /opt/vm-proxy-gateway/vm_proxy_gateway.py stop
 %sudo ALL=(root) NOPASSWD: /usr/bin/python3 /opt/vm-proxy-gateway/vm_proxy_gateway.py restart
 %sudo ALL=(root) NOPASSWD: /usr/bin/python3 /opt/vm-proxy-gateway/vm_proxy_gateway.py traffic-stats
+%sudo ALL=(root) NOPASSWD: /usr/bin/python3 /opt/vm-proxy-gateway/vm_proxy_gateway.py diagnose --config /home/*/.config/vm-proxy-gateway/config.json --repair
 %sudo ALL=(root) NOPASSWD: /usr/bin/python3 /opt/vm-proxy-gateway/vm_proxy_gateway.py uninstall
 EOF
   chmod 0440 "${SUDOERS_FILE}"

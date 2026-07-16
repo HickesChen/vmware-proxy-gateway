@@ -15,10 +15,12 @@ import json
 import os
 import pwd
 import re
+import signal
 import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -35,6 +37,9 @@ TRAFFIC_TABLE_NAME = "vm_proxy_gateway_stats"
 APT_DIR = Path("/etc/apt")
 SING_BOX_BIN = "/usr/local/bin/sing-box"
 DEFAULT_PORT = 10086
+SHELL_BLOCK_BEGIN = "# BEGIN VM-PROXY-GATEWAY MANAGED BLOCK"
+SHELL_BLOCK_END = "# END VM-PROXY-GATEWAY MANAGED BLOCK"
+SHELL_NO_PROXY = "localhost,127.0.0.1,::1,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12"
 DEFAULT_BYPASS_CIDRS = [
     "0.0.0.0/8",
     "10.0.0.0/8",
@@ -357,6 +362,155 @@ def default_user_config_path() -> Path | None:
     return None
 
 
+def user_home_for_config(config_path: Path | None = None) -> Path | None:
+    """Resolve the unprivileged user's home, including pkexec invocations."""
+    if config_path:
+        path = config_path.resolve()
+        if path.name == "config.json" and path.parent.name == APP_NAME and path.parent.parent.name == ".config":
+            return path.parent.parent.parent
+    for name in [os.environ.get("SUDO_USER"), os.environ.get("PKEXEC_UID"), os.environ.get("USER"), os.environ.get("LOGNAME")]:
+        if not name:
+            continue
+        try:
+            entry = pwd.getpwuid(int(name)) if name.isdigit() else pwd.getpwnam(name)
+        except (KeyError, ValueError):
+            continue
+        if entry.pw_uid != 0:
+            return Path(entry.pw_dir)
+    return None
+
+
+def _strip_managed_shell_block(content: str) -> str:
+    lines = content.splitlines(keepends=True)
+    output: list[str] = []
+    inside = False
+    for line in lines:
+        marker = line.strip()
+        if marker == SHELL_BLOCK_BEGIN:
+            inside = True
+            continue
+        if marker == SHELL_BLOCK_END and inside:
+            inside = False
+            continue
+        if not inside:
+            output.append(line)
+    # A truncated managed block owns everything after its begin marker.
+    return "".join(output)
+
+
+def _strip_legacy_shell_proxy(content: str, old_config: dict[str, Any] | None) -> str:
+    """Migrate only the exact consecutive block emitted by older releases."""
+    legacy_pattern = re.compile(
+        r"(?m)^export HTTP_PROXY=http://(?P<endpoint>[^\s/]+:\d+)\n"
+        r"export HTTPS_PROXY=http://(?P=endpoint)\n"
+        r"export ALL_PROXY=socks5h://(?P=endpoint)(?:\n|$)"
+    )
+    content = legacy_pattern.sub("", content)
+    # Also cover older HTTP-only output when a previous config is available.
+    if old_config and old_config.get("proxy_host") and old_config.get("proxy_protocol") == "http":
+        endpoint = f"{old_config['proxy_host']}:{int(old_config.get('proxy_port') or DEFAULT_PORT)}"
+        http_pattern = re.compile(
+            rf"(?m)^export HTTP_PROXY=http://{re.escape(endpoint)}\n"
+            rf"export HTTPS_PROXY=http://{re.escape(endpoint)}\n"
+            rf"export ALL_PROXY=http://{re.escape(endpoint)}(?:\n|$)"
+        )
+        content = http_pattern.sub("", content)
+    return content
+
+
+def managed_shell_block(config: dict[str, Any]) -> str:
+    host, port = config["proxy_host"], int(config["proxy_port"])
+    http_url = f"http://{host}:{port}"
+    all_url = f"socks5h://{host}:{port}" if config["proxy_protocol"] == "socks5" else http_url
+    return (
+        f"{SHELL_BLOCK_BEGIN}\n"
+        f"export HTTP_PROXY={http_url}\n"
+        f"export HTTPS_PROXY={http_url}\n"
+        f"export ALL_PROXY={all_url}\n"
+        f"export NO_PROXY={SHELL_NO_PROXY}\n"
+        f"{SHELL_BLOCK_END}\n"
+    )
+
+
+def stale_proxy_processes(
+    config: dict[str, Any], uid: int, proc_root: Path = Path("/proc")
+) -> list[dict[str, Any]]:
+    """Find long-running VS Code processes that inherited a different proxy."""
+    expected_http = f"http://{config['proxy_host']}:{int(config['proxy_port'])}"
+    expected_all = (
+        f"socks5h://{config['proxy_host']}:{int(config['proxy_port'])}"
+        if config.get("proxy_protocol") == "socks5"
+        else expected_http
+    )
+    expected = {"HTTP_PROXY": expected_http, "HTTPS_PROXY": expected_http, "ALL_PROXY": expected_all}
+    stale: list[dict[str, Any]] = []
+    for directory in proc_root.iterdir() if proc_root.exists() else []:
+        if not directory.name.isdigit():
+            continue
+        try:
+            if directory.stat().st_uid != uid:
+                continue
+            command = directory.joinpath("cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace").strip()
+            if "vscode-server" not in command and ".vscode-server" not in command:
+                continue
+            environ = directory.joinpath("environ").read_bytes().split(b"\0")
+            values = {}
+            for item in environ:
+                key, separator, value = item.partition(b"=")
+                name = key.decode(errors="ignore")
+                if separator and name in expected:
+                    values[name] = value.decode(errors="replace")
+            mismatches = {name: value for name, value in values.items() if value and value != expected[name]}
+            if mismatches:
+                stale.append({"pid": int(directory.name), "command": command, "proxy": mismatches})
+        except (FileNotFoundError, PermissionError, ProcessLookupError, OSError):
+            continue
+    return stale
+
+
+def terminate_stale_proxy_processes(processes: list[dict[str, Any]]) -> list[int]:
+    restarted: list[int] = []
+    for process in processes:
+        pid = int(process["pid"])
+        try:
+            os.kill(pid, signal.SIGTERM)
+            restarted.append(pid)
+        except (ProcessLookupError, PermissionError):
+            continue
+    return restarted
+
+
+def reconcile_shell_proxy(
+    home: Path | None, config: dict[str, Any] | None, old_config: dict[str, Any] | None = None
+) -> bool:
+    """Idempotently update/remove only gateway-owned settings in ~/.profile."""
+    if home is None:
+        return False
+    profile = home / ".profile"
+    original = profile.read_text(encoding="utf-8", errors="ignore") if profile.exists() else ""
+    content = _strip_legacy_shell_proxy(_strip_managed_shell_block(original), old_config).rstrip("\n")
+    if config is not None:
+        content = (content + "\n\n" if content else "") + managed_shell_block(config).rstrip("\n")
+    updated = content + ("\n" if content else "")
+    if updated == original:
+        return False
+    profile.parent.mkdir(parents=True, exist_ok=True)
+    mode = profile.stat().st_mode & 0o777 if profile.exists() else 0o644
+    owner = profile.stat() if profile.exists() else home.stat()
+    fd, tmp_name = tempfile.mkstemp(prefix=".profile.", dir=profile.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(updated)
+        os.chmod(tmp_name, mode)
+        if is_root():
+            os.chown(tmp_name, owner.st_uid, owner.st_gid)
+        os.replace(tmp_name, profile)
+    finally:
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
+    return True
+
+
 def get_local_ipv4_cidrs() -> list[str]:
     try:
         result = run(["ip", "-4", "-o", "addr", "show", "scope", "global"], check=False)
@@ -648,6 +802,8 @@ def apply_config(config_path: Path, restart_active: bool = False) -> None:
     require_root()
     raw = read_json(config_path)
     config = normalize_config(raw)
+    old_config = read_json(SYSTEM_CONFIG) if SYSTEM_CONFIG.exists() else None
+    was_active = is_service_active()
     SYSTEM_DIR.mkdir(parents=True, exist_ok=True)
     write_json(SYSTEM_CONFIG, config)
     write_json(SING_BOX_CONFIG, build_sing_box_config(config))
@@ -657,14 +813,17 @@ def apply_config(config_path: Path, restart_active: bool = False) -> None:
     # Login startup is managed by the GUI so startup failures can be shown to
     # the user. Keep the system service from starting silently before login.
     run(["systemctl", "disable", "vm-proxy-gateway.service"])
-    if restart_active and is_service_active():
+    if restart_active and was_active:
         cleanup_runtime_network_state()
         run(["systemctl", "restart", "vm-proxy-gateway.service"])
+        reconcile_shell_proxy(user_home_for_config(config_path), config, old_config)
 
 
 def apply_and_start(config_path: Path) -> None:
+    old_config = read_json(SYSTEM_CONFIG) if SYSTEM_CONFIG.exists() else None
     apply_config(config_path)
     service_action("restart" if is_service_active() else "start", refresh_config=False)
+    reconcile_shell_proxy(user_home_for_config(config_path), read_json(SYSTEM_CONFIG), old_config)
 
 
 def service_action(action: str, refresh_config: bool = True) -> None:
@@ -673,18 +832,22 @@ def service_action(action: str, refresh_config: bool = True) -> None:
         raise GatewayError(f"Unsupported action: {action}")
     if action in {"start", "restart"}:
         cleanup_runtime_network_state()
-    if refresh_config and action in {"start", "restart"}:
-        user_config = default_user_config_path()
-        if user_config:
-            apply_config(user_config)
+    user_config = default_user_config_path() if refresh_config and action in {"start", "restart"} else None
+    if user_config:
+        apply_config(user_config)
     result = run(["systemctl", action, "vm-proxy-gateway.service"], check=False)
     if result.returncode == 0:
         if action == "stop":
             cleanup_runtime_network_state()
+            reconcile_shell_proxy(user_home_for_config(), None)
+        elif action in {"start", "restart"}:
+            config = read_json(SYSTEM_CONFIG) if SYSTEM_CONFIG.exists() else None
+            reconcile_shell_proxy(user_home_for_config(user_config if refresh_config else None), config)
         return
     missing_unit = result.returncode == 5 or "not loaded" in result.stderr.lower() or "could not be found" in result.stderr.lower()
     if action == "stop" and (missing_unit or not SYSTEMD_UNIT.exists()):
         cleanup_runtime_network_state()
+        reconcile_shell_proxy(user_home_for_config(), None)
         return
     raise subprocess.CalledProcessError(result.returncode, result.args, result.stdout, result.stderr)
 
@@ -834,12 +997,23 @@ def test_network(config_path: Path | None = None) -> dict[str, Any]:
     return result
 
 
-def diagnose(config_path: Path | None = None) -> dict[str, Any]:
+def diagnose(config_path: Path | None = None, repair: bool = False) -> dict[str, Any]:
     raw = read_json(config_path) if config_path and config_path.exists() else {}
     host = str(raw.get("proxy_host") or "").strip()
-    port = int(raw.get("proxy_port") or DEFAULT_PORT)
+    try:
+        port = int(raw.get("proxy_port") or DEFAULT_PORT)
+        port_valid = 0 < port <= 65535
+    except (TypeError, ValueError):
+        port = DEFAULT_PORT
+        port_valid = False
     gateway = get_default_gateway()
     target = host or gateway
+    protocol = str(raw.get("proxy_protocol") or "socks5").lower()
+    if protocol not in {"socks5", "http"}:
+        protocol = "socks5"
+    proxy_config = {"proxy_host": host, "proxy_port": port, "proxy_protocol": protocol} if host else None
+    home = user_home_for_config(config_path)
+    active = is_service_active()
 
     checks: dict[str, Any] = {
         "note": "ICMP ping can be blocked by Windows Firewall. Proxy reachability is tested with TCP connect instead.",
@@ -851,7 +1025,83 @@ def diagnose(config_path: Path | None = None) -> dict[str, Any]:
         "configured_proxy_port": port,
         "tcp_checks": [],
         "advice": [],
+        "repair_requested": repair,
+        "repairs": [],
+        "diagnostic_checks": [],
     }
+
+    diagnostic_checks: list[dict[str, Any]] = checks["diagnostic_checks"]
+
+    solutions = {
+        "user_config": "Save the settings once, then run diagnosis again.",
+        "proxy_host": "Enter the Windows host IP. In NAT mode it is commonly the VM default gateway.",
+        "proxy_port": "Set a numeric proxy port between 1 and 65535 and make it match the Windows proxy.",
+        "default_gateway": "Restore the VM network adapter/DHCP lease, then verify `ip route` has a default route.",
+        "local_dns": "Restore systemd-resolved or set a reachable DNS server in the VM network settings.",
+        "sing_box_binary": "Run install.sh again to download and install the supported sing-box binary.",
+        "curl_binary": "Install curl with `sudo apt install curl`; it is required for end-to-end diagnosis.",
+        "system_config": "Run diagnosis with repair privileges or click Apply to regenerate the system configuration.",
+        "sing_box_config": "Run privileged diagnosis to regenerate sing-box.json from the user configuration.",
+        "systemd_unit": "Run privileged diagnosis or reinstall the application to recreate the systemd unit.",
+        "shell_proxy": "Run privileged diagnosis, then restart login sessions that inherited the old environment.",
+        "vscode_process_environment": "Reconnect VS Code Remote so its server starts with the corrected environment.",
+        "proxy_tcp": f"Enable LAN access on the Windows proxy, listen on 0.0.0.0:{port}, and allow TCP {port} in Windows Firewall.",
+        "generated_configuration": "Run privileged diagnosis or click Apply to rebuild all generated configuration.",
+        "tun_interface": f"Stop the service and delete stale interface {TUN_INTERFACE}, or run privileged diagnosis.",
+        "traffic_accounting": "Run privileged diagnosis to recreate the nftables accounting table; reinstall nftables if missing.",
+        "proxy_http_request": "Verify the configured protocol, Windows proxy outbound connectivity, DNS, and authentication settings.",
+    }
+
+    def record(check_id: str, ok: bool, detail: str, repairable: bool = False, repaired: bool = False) -> None:
+        diagnostic_checks.append({
+            "id": check_id,
+            "ok": ok or repaired,
+            "detected": not ok,
+            "repairable": repairable,
+            "repaired": repaired,
+            "detail": detail,
+            "solution": None if ok or repaired else solutions.get(check_id, "Review the application logs and correct this item manually."),
+        })
+
+    record("user_config", bool(config_path and config_path.exists()), "User configuration file exists.")
+    record("proxy_host", bool(host), "Proxy host is configured.")
+    record("proxy_port", port_valid, f"Proxy port is valid ({port}).")
+    record("default_gateway", bool(gateway), f"Default gateway: {gateway or 'not found'}.")
+    local_dns = checks["local_dns"]
+    record("local_dns", bool(local_dns), f"Direct DNS server: {local_dns or 'not found'}.")
+    record("sing_box_binary", Path(SING_BOX_BIN).is_file() and os.access(SING_BOX_BIN, os.X_OK), f"sing-box executable: {SING_BOX_BIN}.")
+    record("curl_binary", bool(shutil.which("curl")), "curl is available for end-to-end proxy testing.")
+    record("system_config", SYSTEM_CONFIG.exists(), "System configuration exists.", repairable=bool(config_path))
+    record("sing_box_config", SING_BOX_CONFIG.exists(), "sing-box configuration exists.", repairable=bool(config_path))
+    record("systemd_unit", SYSTEMD_UNIT.exists(), "systemd service unit exists.", repairable=bool(config_path))
+    record("service_state", True, f"Gateway service is {'active' if active else 'inactive'}.")
+
+    if proxy_config and home:
+        try:
+            uid = home.stat().st_uid
+            stale = stale_proxy_processes(proxy_config, uid)
+        except OSError:
+            stale = []
+        checks["stale_proxy_processes"] = stale
+        profile = home / ".profile"
+        profile_content = profile.read_text(encoding="utf-8", errors="ignore") if profile.exists() else ""
+        expected_block = managed_shell_block(proxy_config).strip()
+        shell_ok = expected_block in profile_content if active else SHELL_BLOCK_BEGIN not in profile_content
+        shell_repaired = False
+        if repair:
+            changed = reconcile_shell_proxy(home, proxy_config if active else None, read_json(SYSTEM_CONFIG) if SYSTEM_CONFIG.exists() else None)
+            if changed:
+                checks["repairs"].append("shell_proxy_updated" if active else "shell_proxy_removed")
+                shell_repaired = True
+            restarted = terminate_stale_proxy_processes(stale)
+            checks["restarted_process_ids"] = restarted
+            if restarted:
+                checks["repairs"].append("stale_vscode_server_restarted")
+        record("shell_proxy", shell_ok, "Persistent Shell proxy matches the service state.", True, shell_repaired)
+        record("vscode_process_environment", not stale, "VS Code Server processes use the current proxy.", True, bool(checks.get("restarted_process_ids")))
+    else:
+        record("shell_proxy", not active, "Shell proxy ownership could not be resolved.", False)
+        record("vscode_process_environment", True, "No stale VS Code Server proxy was detected.")
 
     tcp_checks: list[dict[str, Any]] = []
     for candidate in [target, gateway]:
@@ -866,17 +1116,69 @@ def diagnose(config_path: Path | None = None) -> dict[str, Any]:
             "error": None if ok else err,
         })
     checks["tcp_checks"] = tcp_checks
+    configured_reachable = next((item["reachable"] for item in tcp_checks if item["label"] == "configured_proxy"), False)
+    record("proxy_tcp", bool(configured_reachable), f"Proxy TCP endpoint {host or target}:{port} is reachable.")
+
+    # Rebuild derived state only when the upstream is reachable; this repairs
+    # config drift, missing sing-box JSON, the unit file, and nft accounting.
+    artifacts_ok = False
+    if proxy_config and SYSTEM_CONFIG.exists():
+        try:
+            system_raw = read_json(SYSTEM_CONFIG)
+            artifacts_ok = (
+                str(system_raw.get("proxy_host")) == host
+                and int(system_raw.get("proxy_port") or DEFAULT_PORT) == port
+                and str(system_raw.get("proxy_protocol")) == protocol
+                and SING_BOX_CONFIG.exists()
+                and SYSTEMD_UNIT.exists()
+            )
+        except (OSError, ValueError, json.JSONDecodeError):
+            artifacts_ok = False
+    artifacts_repaired = False
+    if repair and not artifacts_ok and configured_reachable and config_path:
+        apply_config(config_path, restart_active=active)
+        artifacts_repaired = True
+        checks["repairs"].append("generated_configuration_rebuilt")
+        for item in diagnostic_checks:
+            if item["id"] in {"system_config", "sing_box_config", "systemd_unit"} and not item["ok"]:
+                item.update({"ok": True, "repaired": True, "solution": None})
+    record("generated_configuration", artifacts_ok, "System, sing-box, and systemd configuration are synchronized.", True, artifacts_repaired)
+
+    tun_exists = Path(f"/sys/class/net/{TUN_INTERFACE}").exists()
+    tun_ok = active or not tun_exists
+    tun_repaired = False
+    if repair and not tun_ok:
+        cleanup_runtime_network_state()
+        tun_repaired = True
+        checks["repairs"].append("stale_tun_removed")
+    record("tun_interface", tun_ok, "TUN interface state matches the service state.", True, tun_repaired)
+
+    nft = run(["nft", "list", "table", TRAFFIC_TABLE_FAMILY, TRAFFIC_TABLE_NAME], check=False) if shutil.which("nft") else None
+    nft_ok = not active or bool(nft and nft.returncode == 0)
+    nft_repaired = artifacts_repaired and active
+    record("traffic_accounting", nft_ok, "Traffic accounting table is available when the service is active.", bool(proxy_config), nft_repaired)
+
+    web_ok = False
+    web_error = None
+    if configured_reachable and shutil.which("curl") and proxy_config:
+        curl_proxy = f"socks5h://{host}:{port}" if protocol == "socks5" else f"http://{host}:{port}"
+        web = run(["curl", "-fsSL", "--max-time", "8", "--proxy", curl_proxy, "https://api.ipify.org"], check=False)
+        web_ok = web.returncode == 0
+        web_error = web.stderr.strip() if not web_ok else None
+    checks["proxy_http_test"] = "ok" if web_ok else "failed"
+    checks["proxy_http_error"] = web_error
+    record("proxy_http_request", web_ok, "An HTTPS request succeeds through the configured proxy.")
 
     if not target:
         checks["advice"].append("No proxy host is configured and no default gateway was detected.")
-    elif not any(item["reachable"] for item in tcp_checks):
+    elif host and not configured_reachable:
         checks["advice"].extend([
             f"Make sure the Windows proxy listens on {target}:{port}, not only on 127.0.0.1:{port}.",
             "If you use Clash/mihomo/v2rayN, enable LAN access / allow LAN / bind 0.0.0.0.",
             f"Allow inbound TCP {port} in Windows Defender Firewall for the private network.",
             "Do not use ping as the final test; Windows commonly blocks ICMP while TCP still works.",
         ])
-    else:
+    elif configured_reachable:
         checks["advice"].append("The proxy TCP port is reachable from the Ubuntu VM.")
 
     return checks
@@ -899,6 +1201,7 @@ def uninstall() -> None:
     if SYSTEMD_UNIT.exists():
         SYSTEMD_UNIT.unlink()
     run(["systemctl", "daemon-reload"], check=False)
+    reconcile_shell_proxy(user_home_for_config(default_user_config_path()), None)
     # Keep /etc/vm-proxy-gateway for diagnostics and deliberate re-install reuse.
 
 
@@ -917,6 +1220,7 @@ def main() -> int:
     p_test.add_argument("--config", type=Path)
     p_diagnose = sub.add_parser("diagnose")
     p_diagnose.add_argument("--config", type=Path)
+    p_diagnose.add_argument("--repair", action="store_true")
     args = parser.parse_args()
 
     try:
@@ -938,7 +1242,7 @@ def main() -> int:
         elif args.command == "test":
             print(json.dumps(test_network(args.config), indent=2, sort_keys=True))
         elif args.command == "diagnose":
-            print(json.dumps(diagnose(args.config), indent=2, sort_keys=True))
+            print(json.dumps(diagnose(args.config, repair=args.repair), indent=2, sort_keys=True))
         elif args.command == "discover":
             print(json.dumps(discover(), indent=2, sort_keys=True))
         elif args.command == "uninstall":

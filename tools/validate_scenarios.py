@@ -405,6 +405,105 @@ def test_apply_restarts_active_service() -> None:
             ctl.configure_proxy_traffic_accounting = old_accounting
 
 
+def test_shell_proxy_reconciliation() -> None:
+    new = {"proxy_host": "10.211.181.216", "proxy_port": 10086, "proxy_protocol": "socks5"}
+    with tempfile.TemporaryDirectory() as tmp:
+        home = Path(tmp)
+        profile = home / ".profile"
+        profile.write_text(
+            "export USER_PROXY=http://manual.example:8080\n"
+            "export HTTP_PROXY=http://192.168.0.6:10086\n"
+            "export HTTPS_PROXY=http://192.168.0.6:10086\n"
+            "export ALL_PROXY=socks5h://192.168.0.6:10086\n",
+            encoding="utf-8",
+        )
+        # Migration must work even if config.json has already moved to the new endpoint.
+        assert ctl.reconcile_shell_proxy(home, new, new) is True
+        content = profile.read_text(encoding="utf-8")
+        assert "192.168.0.6" not in content
+        assert content.count(ctl.SHELL_BLOCK_BEGIN) == 1
+        assert "HTTP_PROXY=http://10.211.181.216:10086" in content
+        assert "export USER_PROXY=http://manual.example:8080" in content
+        assert ctl.reconcile_shell_proxy(home, new, new) is False
+        assert profile.read_text(encoding="utf-8") == content
+        assert ctl.reconcile_shell_proxy(home, None) is True
+        cleaned = profile.read_text(encoding="utf-8")
+        assert ctl.SHELL_BLOCK_BEGIN not in cleaned
+        assert "export USER_PROXY=http://manual.example:8080" in cleaned
+
+
+def test_shell_proxy_preserves_unmanaged_exports() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        home = Path(tmp)
+        profile = home / ".profile"
+        manual = "export HTTP_PROXY=http://manual.example:3128\n"
+        profile.write_text(manual, encoding="utf-8")
+        assert ctl.reconcile_shell_proxy(home, None) is False
+        assert profile.read_text(encoding="utf-8") == manual
+
+
+def test_stale_vscode_proxy_process_detection() -> None:
+    config = {"proxy_host": "10.211.181.216", "proxy_port": 10086, "proxy_protocol": "socks5"}
+    with tempfile.TemporaryDirectory() as tmp:
+        proc = Path(tmp)
+        stale = proc / "12345"
+        stale.mkdir()
+        stale.joinpath("cmdline").write_bytes(b"/home/user/.vscode-server/bin/code-server\0--start-server\0")
+        stale.joinpath("environ").write_bytes(
+            b"HTTP_PROXY=http://192.168.0.6:10086\0"
+            b"HTTPS_PROXY=http://192.168.0.6:10086\0"
+            b"ALL_PROXY=socks5h://192.168.0.6:10086\0"
+        )
+        current = proc / "12346"
+        current.mkdir()
+        current.joinpath("cmdline").write_bytes(b"/home/user/.vscode-server/bin/code-server\0")
+        current.joinpath("environ").write_bytes(
+            b"HTTP_PROXY=http://10.211.181.216:10086\0"
+            b"ALL_PROXY=socks5h://10.211.181.216:10086\0"
+        )
+        found = ctl.stale_proxy_processes(config, stale.stat().st_uid, proc)
+        assert [item["pid"] for item in found] == [12345]
+        assert found[0]["proxy"]["HTTP_PROXY"] == "http://192.168.0.6:10086"
+
+
+def test_diagnose_reports_common_checks_and_solutions() -> None:
+    names = [
+        "get_default_gateway", "get_system_dns_server", "get_apt_source_domains",
+        "get_local_ipv4_cidrs", "is_service_active", "tcp_connect",
+        "user_home_for_config", "stale_proxy_processes", "run",
+    ]
+    originals = {name: getattr(ctl, name) for name in names}
+    old_paths = (ctl.SYSTEM_CONFIG, ctl.SING_BOX_CONFIG, ctl.SYSTEMD_UNIT)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        config = root / "config.json"
+        config.write_text(json.dumps({
+            "proxy_host": "192.0.2.10", "proxy_port": 10086, "proxy_protocol": "socks5",
+        }), encoding="utf-8")
+        ctl.SYSTEM_CONFIG = root / "missing-system.json"
+        ctl.SING_BOX_CONFIG = root / "missing-sing.json"
+        ctl.SYSTEMD_UNIT = root / "missing.service"
+        ctl.get_default_gateway = lambda: "192.0.2.1"
+        ctl.get_system_dns_server = lambda: "192.0.2.53"
+        ctl.get_apt_source_domains = lambda: []
+        ctl.get_local_ipv4_cidrs = lambda: ["192.0.2.0/24"]
+        ctl.is_service_active = lambda: False
+        ctl.tcp_connect = lambda host, port: (False, "connection refused")
+        ctl.user_home_for_config = lambda path=None: root
+        ctl.stale_proxy_processes = lambda config, uid: []
+        ctl.run = lambda cmd, check=True: FakeResult(returncode=1, stderr="unavailable")
+        try:
+            result = ctl.diagnose(config, repair=False)
+        finally:
+            for name, value in originals.items():
+                setattr(ctl, name, value)
+            ctl.SYSTEM_CONFIG, ctl.SING_BOX_CONFIG, ctl.SYSTEMD_UNIT = old_paths
+    checks = result["diagnostic_checks"]
+    assert len(checks) >= 10
+    assert len({item["id"] for item in checks}) == len(checks)
+    assert all(item.get("solution") for item in checks if not item["ok"])
+
+
 def test_single_instance_lock() -> None:
     old_lock_file = gui.LOCK_FILE
     with tempfile.TemporaryDirectory() as tmp:
@@ -491,6 +590,10 @@ def main() -> int:
         ("gui_discover_populates_and_shows_result", test_gui_discover_populates_and_shows_result),
         ("stop_missing_unit_is_safe", test_stop_missing_unit_is_safe),
         ("apply_restarts_active_service", test_apply_restarts_active_service),
+        ("shell_proxy_reconciliation", test_shell_proxy_reconciliation),
+        ("shell_proxy_preserves_unmanaged_exports", test_shell_proxy_preserves_unmanaged_exports),
+        ("stale_vscode_proxy_process_detection", test_stale_vscode_proxy_process_detection),
+        ("diagnose_reports_common_checks_and_solutions", test_diagnose_reports_common_checks_and_solutions),
         ("single_instance_lock", test_single_instance_lock),
         ("active_tray_icon_tint", test_active_tray_icon_tint),
         ("sing_box_config_shape", test_sing_box_config_shape),

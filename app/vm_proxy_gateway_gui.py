@@ -206,6 +206,13 @@ TEXT = {
         "tcp_label_configured_proxy": "Configured proxy",
         "tcp_label_default_gateway": "Default gateway probe",
         "diagnose_advice": "Suggestions:",
+        "diagnose_repaired_shell": "Repaired persistent Shell proxy settings.",
+        "diagnose_restarted_vscode": "Restarted {count} VS Code Server process(es) that were using a stale proxy; Remote may reconnect briefly.",
+        "diagnose_checks": "Checks and repairs:",
+        "diagnose_check_ok": "OK",
+        "diagnose_check_fixed": "REPAIRED",
+        "diagnose_check_bad": "ISSUE",
+        "diagnose_solution": "Solution: {solution}",
         "discover_found": "Suggested proxy host: {candidate}. This is usually the Windows host address for NAT mode.",
         "discover_none": "No candidate proxy host was found automatically. Enter the Windows host IP manually.",
         "discover_gateway": "Detected VM default gateway: {gateway}.",
@@ -370,6 +377,13 @@ TEXT = {
         "tcp_label_configured_proxy": "当前填写的代理",
         "tcp_label_default_gateway": "默认网关探测",
         "diagnose_advice": "建议：",
+        "diagnose_repaired_shell": "已自动修复 Shell 持久化代理配置。",
+        "diagnose_restarted_vscode": "已重启 {count} 个仍使用旧代理的 VS Code Server 进程，Remote 连接可能会短暂重连。",
+        "diagnose_checks": "检查与修复：",
+        "diagnose_check_ok": "正常",
+        "diagnose_check_fixed": "已修复",
+        "diagnose_check_bad": "异常",
+        "diagnose_solution": "解决方案：{solution}",
         "discover_found": "建议的代理主机：{candidate}。NAT 模式下这通常就是 Windows 主机地址。",
         "discover_none": "没有自动发现候选代理主机。请手动填写 Windows 主机 IP。",
         "discover_gateway": "检测到的虚拟机默认网关：{gateway}。",
@@ -534,6 +548,13 @@ TEXT = {
         "tcp_label_configured_proxy": "目前填寫的代理",
         "tcp_label_default_gateway": "預設閘道探測",
         "diagnose_advice": "建議：",
+        "diagnose_repaired_shell": "已自動修復 Shell 持久化代理設定。",
+        "diagnose_restarted_vscode": "已重新啟動 {count} 個仍使用舊代理的 VS Code Server 程序，Remote 連線可能會短暫重連。",
+        "diagnose_checks": "檢查與修復：",
+        "diagnose_check_ok": "正常",
+        "diagnose_check_fixed": "已修復",
+        "diagnose_check_bad": "異常",
+        "diagnose_solution": "解決方案：{solution}",
         "discover_found": "建議的代理主機：{candidate}。NAT 模式下這通常就是 Windows 主機位址。",
         "discover_none": "沒有自動偵測到候選代理主機。請手動填寫 Windows 主機 IP。",
         "discover_gateway": "偵測到的虛擬機預設閘道：{gateway}。",
@@ -1980,6 +2001,25 @@ class App(tk.Tk):
 
         if kind == "diagnose" and data:
             lines = []
+            repairs = data.get("repairs") or []
+            if "shell_proxy_updated" in repairs or "shell_proxy_removed" in repairs:
+                lines.append(self.tr("diagnose_repaired_shell"))
+            restarted = data.get("restarted_process_ids") or []
+            if restarted:
+                lines.append(self.tr("diagnose_restarted_vscode", count=len(restarted)))
+            diagnostic_checks = data.get("diagnostic_checks") or []
+            if diagnostic_checks:
+                lines.append(self.tr("diagnose_checks"))
+                for item in diagnostic_checks:
+                    if item.get("repaired"):
+                        state = self.tr("diagnose_check_fixed")
+                    elif item.get("ok"):
+                        state = self.tr("diagnose_check_ok")
+                    else:
+                        state = self.tr("diagnose_check_bad")
+                    lines.append(f"- [{state}] {item.get('id')}: {item.get('detail') or ''}")
+                    if item.get("solution"):
+                        lines.append("  " + self.tr("diagnose_solution", solution=item.get("solution")))
             if data.get("configured_proxy_host"):
                 lines.append(
                     self.tr(
@@ -2188,7 +2228,7 @@ class App(tk.Tk):
             return
         self._set_button_busy("diagnose", "diagnosing")
         try:
-            result = run_controller("diagnose", extra=["--config", str(USER_CONFIG)])
+            result = run_controller("diagnose", privileged=True, extra=["--config", str(USER_CONFIG), "--repair"])
         finally:
             self._restore_button("diagnose")
         self.log(self.tr("log_diagnose"), result, kind="diagnose")
@@ -2196,9 +2236,11 @@ class App(tk.Tk):
         self._update_effective_rule_context(data)
         checks = data.get("tcp_checks") or []
         command_ok = result.returncode == 0
-        reachable = any(item.get("reachable") for item in checks)
-        self._show_result(self.tr("log_diagnose"), command_ok, warning=command_ok and not reachable)
-        self.maybe_notify_tray_action(ok=command_ok and reachable)
+        reachable = any(item.get("reachable") for item in checks if item.get("label") == "configured_proxy")
+        diagnostic_ok = all(item.get("ok") for item in data.get("diagnostic_checks") or [])
+        healthy = command_ok and reachable and diagnostic_ok
+        self._show_result(self.tr("log_diagnose"), command_ok, warning=command_ok and not healthy)
+        self.maybe_notify_tray_action(ok=healthy)
 
     def refresh_status(self, notify: bool = True) -> None:
         if not CONTROLLER.exists():

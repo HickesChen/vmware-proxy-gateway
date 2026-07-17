@@ -2017,7 +2017,7 @@ class App(tk.Tk):
                         state = self.tr("diagnose_check_ok")
                     else:
                         state = self.tr("diagnose_check_bad")
-                    lines.append(f"- [{state}] {item.get('id')}: {item.get('detail') or ''}")
+                    lines.append(f"- [{state}] {item.get('name') or item.get('id')}: {item.get('detail') or ''}")
                     if item.get("solution"):
                         lines.append("  " + self.tr("diagnose_solution", solution=item.get("solution")))
             if data.get("configured_proxy_host"):

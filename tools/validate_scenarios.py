@@ -334,14 +334,21 @@ def test_gui_discover_populates_and_shows_result() -> None:
 
 
 def test_stop_missing_unit_is_safe() -> None:
+    calls: list[list[str]] = []
     old_run = ctl.run
     old_is_root = ctl.is_root
     old_unit = ctl.SYSTEMD_UNIT
     ctl.is_root = lambda: True
     ctl.SYSTEMD_UNIT = Path("/tmp/vm-proxy-gateway-unit-that-does-not-exist.service")
-    ctl.run = lambda cmd, check=True: FakeResult(stderr="Unit vm-proxy-gateway.service could not be found.\n", returncode=5)
+    def fake_run(cmd, check=True):
+        calls.append(cmd)
+        return FakeResult(stderr="Unit vm-proxy-gateway.service could not be found.\n", returncode=5)
+    ctl.run = fake_run
     try:
         ctl.service_action("stop")
+        assert ["nft", "delete", "table", ctl.TRAFFIC_TABLE_FAMILY, ctl.TRAFFIC_TABLE_NAME] in calls
+        assert ["ip", "link", "delete", ctl.TUN_INTERFACE] in calls
+        assert ["resolvectl", "revert", ctl.TUN_INTERFACE] in calls
     finally:
         ctl.run = old_run
         ctl.is_root = old_is_root
@@ -501,7 +508,9 @@ def test_diagnose_reports_common_checks_and_solutions() -> None:
     checks = result["diagnostic_checks"]
     assert len(checks) >= 10
     assert len({item["id"] for item in checks}) == len(checks)
+    assert all(item.get("name") and item["name"] != item["id"] for item in checks)
     assert all(item.get("solution") for item in checks if not item["ok"])
+    assert all(item.get("solution") is None for item in checks if item["ok"])
 
 
 def test_single_instance_lock() -> None:

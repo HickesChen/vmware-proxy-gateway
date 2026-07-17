@@ -793,6 +793,32 @@ def cleanup_runtime_network_state() -> None:
             pass
 
 
+def cleanup_traffic_accounting() -> None:
+    try:
+        run(["nft", "delete", "table", TRAFFIC_TABLE_FAMILY, TRAFFIC_TABLE_NAME], check=False)
+    except FileNotFoundError:
+        pass
+
+
+def cleanup_managed_shell_for_all_users() -> int:
+    """Remove only owned blocks during uninstall, including direct-root runs."""
+    cleaned = 0
+    seen: set[Path] = set()
+    preferred = user_home_for_config(default_user_config_path())
+    homes = [preferred] if preferred else []
+    homes.extend(Path(entry.pw_dir) for entry in pwd.getpwall() if entry.pw_uid >= 1000 and entry.pw_dir)
+    for home in homes:
+        if home is None or home in seen or not home.is_dir():
+            continue
+        seen.add(home)
+        try:
+            if reconcile_shell_proxy(home, None):
+                cleaned += 1
+        except OSError:
+            continue
+    return cleaned
+
+
 def is_service_active() -> bool:
     result = run(["systemctl", "is-active", "vm-proxy-gateway.service"], check=False)
     return result.stdout.strip() == "active"
@@ -839,6 +865,7 @@ def service_action(action: str, refresh_config: bool = True) -> None:
     if result.returncode == 0:
         if action == "stop":
             cleanup_runtime_network_state()
+            cleanup_traffic_accounting()
             reconcile_shell_proxy(user_home_for_config(), None)
         elif action in {"start", "restart"}:
             config = read_json(SYSTEM_CONFIG) if SYSTEM_CONFIG.exists() else None
@@ -847,6 +874,7 @@ def service_action(action: str, refresh_config: bool = True) -> None:
     missing_unit = result.returncode == 5 or "not loaded" in result.stderr.lower() or "could not be found" in result.stderr.lower()
     if action == "stop" and (missing_unit or not SYSTEMD_UNIT.exists()):
         cleanup_runtime_network_state()
+        cleanup_traffic_accounting()
         reconcile_shell_proxy(user_home_for_config(), None)
         return
     raise subprocess.CalledProcessError(result.returncode, result.args, result.stdout, result.stderr)
@@ -1031,6 +1059,32 @@ def diagnose(config_path: Path | None = None, repair: bool = False) -> dict[str,
     }
 
     diagnostic_checks: list[dict[str, Any]] = checks["diagnostic_checks"]
+    chinese = str(raw.get("language") or "").lower().startswith("zh")
+
+    def human(en: str, zh: str) -> str:
+        return zh if chinese else en
+
+    check_names = {
+        "user_config": human("User settings", "用户配置文件"),
+        "proxy_host": human("Proxy server address", "代理服务器地址"),
+        "proxy_port": human("Proxy server port", "代理服务器端口"),
+        "default_gateway": human("VM default gateway", "虚拟机默认网关"),
+        "local_dns": human("DNS server", "DNS 服务器"),
+        "sing_box_binary": human("sing-box program", "sing-box 核心程序"),
+        "curl_binary": human("Network test tool", "网络测试工具 curl"),
+        "system_config": human("System proxy configuration", "系统代理配置"),
+        "sing_box_config": human("sing-box runtime configuration", "sing-box 运行配置"),
+        "systemd_unit": human("Proxy system service", "代理系统服务"),
+        "service_state": human("Proxy service state", "代理服务状态"),
+        "shell_proxy": human("Persistent Shell proxy", "Shell 持久化代理"),
+        "vscode_process_environment": human("VS Code Remote proxy environment", "VS Code Remote 代理环境"),
+        "proxy_tcp": human("Connection to the proxy port", "代理端口连接"),
+        "generated_configuration": human("Configuration consistency", "配置一致性"),
+        "tun_interface": human("Transparent-proxy network interface", "透明代理网络接口"),
+        "traffic_accounting": human("Traffic accounting rules", "流量统计规则"),
+        "runtime_dns": human("Temporary proxy DNS state", "临时代理 DNS 状态"),
+        "proxy_http_request": human("Internet request through proxy", "通过代理访问互联网"),
+    }
 
     solutions = {
         "user_config": "Save the settings once, then run diagnosis again.",
@@ -1049,12 +1103,35 @@ def diagnose(config_path: Path | None = None, repair: bool = False) -> dict[str,
         "generated_configuration": "Run privileged diagnosis or click Apply to rebuild all generated configuration.",
         "tun_interface": f"Stop the service and delete stale interface {TUN_INTERFACE}, or run privileged diagnosis.",
         "traffic_accounting": "Run privileged diagnosis to recreate the nftables accounting table; reinstall nftables if missing.",
+        "runtime_dns": f"Run privileged diagnosis or `sudo resolvectl revert {TUN_INTERFACE}` to remove the stale per-interface DNS state.",
         "proxy_http_request": "Verify the configured protocol, Windows proxy outbound connectivity, DNS, and authentication settings.",
     }
+    if chinese:
+        solutions.update({
+            "user_config": "先点击“应用”保存设置，然后重新运行诊断。",
+            "proxy_host": "填写 Windows 宿主机地址；NAT 网络中通常可先尝试上方显示的虚拟机默认网关。",
+            "proxy_port": "填写 1 到 65535 之间的数字，并确保与 Windows 代理软件的监听端口一致。",
+            "default_gateway": "检查虚拟机网卡是否已连接并启用 DHCP，然后运行 ip route，确认存在 default via 路由。",
+            "local_dns": "恢复 systemd-resolved，或在虚拟机网络设置中填写一个从虚拟机可达的 DNS 服务器。",
+            "sing_box_binary": "在项目目录重新运行 sudo ./install.sh，重新安装 sing-box 核心。",
+            "curl_binary": "运行 sudo apt install curl，安装用于实际联网验证的工具。",
+            "system_config": "使用管理员权限重新诊断，或点击“应用”，让程序重新生成系统配置。",
+            "sing_box_config": "使用管理员权限重新诊断，自动从用户配置重新生成 sing-box 配置。",
+            "systemd_unit": "使用管理员权限重新诊断；仍失败时重新运行 sudo ./install.sh。",
+            "shell_proxy": "使用管理员权限重新诊断清理配置；随后重新登录 Shell，使新进程不再继承旧代理。",
+            "vscode_process_environment": "断开并重新连接 VS Code Remote；诊断修复模式会自动终止仍持有旧地址的 Server 进程。",
+            "proxy_tcp": f"在 Windows 代理软件中启用“允许局域网连接”，监听 0.0.0.0:{port}，并在 Windows 防火墙放行 TCP {port}。",
+            "generated_configuration": "点击“应用”或运行管理员诊断，重新生成系统配置、sing-box 配置和 systemd 服务。",
+            "tun_interface": f"运行管理员诊断自动删除残留接口；也可在服务停止后执行 sudo ip link delete {TUN_INTERFACE}。",
+            "traffic_accounting": "运行管理员诊断重建 nftables 规则；若 nft 命令缺失，运行 sudo apt install nftables。",
+            "runtime_dns": f"运行管理员诊断自动清理；也可执行 sudo resolvectl revert {TUN_INTERFACE} 删除残留的接口 DNS 状态。",
+            "proxy_http_request": "确认代理协议选择正确，并检查 Windows 代理自身能否联网、DNS 是否正常以及代理是否要求认证。",
+        })
 
     def record(check_id: str, ok: bool, detail: str, repairable: bool = False, repaired: bool = False) -> None:
         diagnostic_checks.append({
             "id": check_id,
+            "name": check_names.get(check_id, check_id),
             "ok": ok or repaired,
             "detected": not ok,
             "repairable": repairable,
@@ -1063,18 +1140,21 @@ def diagnose(config_path: Path | None = None, repair: bool = False) -> dict[str,
             "solution": None if ok or repaired else solutions.get(check_id, "Review the application logs and correct this item manually."),
         })
 
-    record("user_config", bool(config_path and config_path.exists()), "User configuration file exists.")
-    record("proxy_host", bool(host), "Proxy host is configured.")
-    record("proxy_port", port_valid, f"Proxy port is valid ({port}).")
-    record("default_gateway", bool(gateway), f"Default gateway: {gateway or 'not found'}.")
+    user_config_ok = bool(config_path and config_path.exists())
+    record("user_config", user_config_ok, human("The user settings file is readable.", "用户配置文件存在且可以读取。") if user_config_ok else human("The user settings file does not exist, so there is no reliable configuration to repair from.", "找不到用户配置文件，程序没有可用于自动修复的可靠配置来源。"))
+    record("proxy_host", bool(host), human(f"Configured proxy server: {host}.", f"当前代理服务器：{host}。") if host else human("No proxy server address is configured.", "代理服务器地址为空，程序不知道应连接哪台主机。"))
+    record("proxy_port", port_valid, human(f"Configured proxy port: {port}.", f"当前代理端口：{port}。") if port_valid else human(f"The configured port is not a valid number from 1 to 65535; diagnosis used fallback {port}.", f"填写的端口不是 1 到 65535 之间的有效数字；本次诊断临时使用了 {port}。"))
+    record("default_gateway", bool(gateway), human(f"Detected default gateway: {gateway}.", f"检测到默认网关：{gateway}。") if gateway else human("No default route was found; the VM may not have a working network connection.", "没有检测到默认路由，虚拟机网卡可能未连接或 DHCP 配置异常。"))
     local_dns = checks["local_dns"]
-    record("local_dns", bool(local_dns), f"Direct DNS server: {local_dns or 'not found'}.")
-    record("sing_box_binary", Path(SING_BOX_BIN).is_file() and os.access(SING_BOX_BIN, os.X_OK), f"sing-box executable: {SING_BOX_BIN}.")
-    record("curl_binary", bool(shutil.which("curl")), "curl is available for end-to-end proxy testing.")
-    record("system_config", SYSTEM_CONFIG.exists(), "System configuration exists.", repairable=bool(config_path))
-    record("sing_box_config", SING_BOX_CONFIG.exists(), "sing-box configuration exists.", repairable=bool(config_path))
-    record("systemd_unit", SYSTEMD_UNIT.exists(), "systemd service unit exists.", repairable=bool(config_path))
-    record("service_state", True, f"Gateway service is {'active' if active else 'inactive'}.")
+    record("local_dns", bool(local_dns), human(f"Detected DNS server: {local_dns}.", f"检测到 DNS 服务器：{local_dns}。") if local_dns else human("No usable DNS server was detected.", "没有检测到可用的 DNS 服务器，域名请求可能失败。"))
+    sing_ok = Path(SING_BOX_BIN).is_file() and os.access(SING_BOX_BIN, os.X_OK)
+    record("sing_box_binary", sing_ok, human(f"sing-box is installed at {SING_BOX_BIN}.", f"sing-box 已安装：{SING_BOX_BIN}。") if sing_ok else human(f"{SING_BOX_BIN} is missing or not executable; the proxy service cannot start.", f"{SING_BOX_BIN} 不存在或不可执行，透明代理服务无法启动。"))
+    curl_ok = bool(shutil.which("curl"))
+    record("curl_binary", curl_ok, human("curl is available.", "curl 网络测试工具可用。") if curl_ok else human("curl is not installed, so diagnosis cannot verify a real HTTPS request.", "系统未安装 curl，因此无法验证真实 HTTPS 请求。"))
+    record("system_config", SYSTEM_CONFIG.exists(), human("The system configuration exists.", "系统代理配置存在。") if SYSTEM_CONFIG.exists() else human(f"{SYSTEM_CONFIG} is missing.", f"缺少系统配置文件 {SYSTEM_CONFIG}。"), repairable=bool(config_path))
+    record("sing_box_config", SING_BOX_CONFIG.exists(), human("The sing-box runtime configuration exists.", "sing-box 运行配置存在。") if SING_BOX_CONFIG.exists() else human(f"{SING_BOX_CONFIG} is missing.", f"缺少 sing-box 运行配置 {SING_BOX_CONFIG}。"), repairable=bool(config_path))
+    record("systemd_unit", SYSTEMD_UNIT.exists(), human("The systemd service unit exists.", "systemd 服务单元存在。") if SYSTEMD_UNIT.exists() else human(f"{SYSTEMD_UNIT} is missing; systemd cannot manage the proxy.", f"缺少 {SYSTEMD_UNIT}，systemd 无法管理代理服务。"), repairable=bool(config_path))
+    record("service_state", True, human(f"The proxy service is {'running' if active else 'stopped'}.", f"代理服务当前{'正在运行' if active else '已停止'}。"))
 
     if proxy_config and home:
         try:
@@ -1097,8 +1177,11 @@ def diagnose(config_path: Path | None = None, repair: bool = False) -> dict[str,
             checks["restarted_process_ids"] = restarted
             if restarted:
                 checks["repairs"].append("stale_vscode_server_restarted")
-        record("shell_proxy", shell_ok, "Persistent Shell proxy matches the service state.", True, shell_repaired)
-        record("vscode_process_environment", not stale, "VS Code Server processes use the current proxy.", True, bool(checks.get("restarted_process_ids")))
+        shell_detail = human("The persistent Shell proxy was corrected to match the service state.", "已修正 Shell 持久化代理，使其与当前服务状态一致。") if shell_repaired else (human("Persistent Shell proxy matches the service state.", "Shell 持久化代理与当前服务状态一致。") if shell_ok else human("~/.profile contains a missing, stale, or conflicting managed proxy block.", "~/.profile 中的托管代理块缺失、过期或与当前服务状态冲突。"))
+        vscode_restarted = bool(checks.get("restarted_process_ids"))
+        vscode_detail = human(f"Restarted {len(checks.get('restarted_process_ids') or [])} stale VS Code Server process(es).", f"已重启 {len(checks.get('restarted_process_ids') or [])} 个仍使用旧代理的 VS Code Server 进程。") if vscode_restarted else (human("VS Code Server processes use the current proxy.", "VS Code Server 进程使用的是当前代理。") if not stale else human(f"Found {len(stale)} VS Code Server process(es) still using another proxy address.", f"发现 {len(stale)} 个 VS Code Server 进程仍在使用其他代理地址。"))
+        record("shell_proxy", shell_ok, shell_detail, True, shell_repaired)
+        record("vscode_process_environment", not stale, vscode_detail, True, vscode_restarted)
     else:
         record("shell_proxy", not active, "Shell proxy ownership could not be resolved.", False)
         record("vscode_process_environment", True, "No stale VS Code Server proxy was detected.")
@@ -1117,7 +1200,8 @@ def diagnose(config_path: Path | None = None, repair: bool = False) -> dict[str,
         })
     checks["tcp_checks"] = tcp_checks
     configured_reachable = next((item["reachable"] for item in tcp_checks if item["label"] == "configured_proxy"), False)
-    record("proxy_tcp", bool(configured_reachable), f"Proxy TCP endpoint {host or target}:{port} is reachable.")
+    tcp_error = next((item.get("error") for item in tcp_checks if item["label"] == "configured_proxy"), None)
+    record("proxy_tcp", bool(configured_reachable), human(f"Connected to {host}:{port}.", f"已连接代理端口 {host}:{port}。") if configured_reachable else human(f"Cannot connect to {host or '(not configured)'}:{port}: {tcp_error or 'no proxy address'}.", f"无法连接代理端口 {host or '（未配置地址）'}:{port}：{tcp_error or '没有代理地址'}。"))
 
     # Rebuild derived state only when the upstream is reachable; this repairs
     # config drift, missing sing-box JSON, the unit file, and nft accounting.
@@ -1141,8 +1225,13 @@ def diagnose(config_path: Path | None = None, repair: bool = False) -> dict[str,
         checks["repairs"].append("generated_configuration_rebuilt")
         for item in diagnostic_checks:
             if item["id"] in {"system_config", "sing_box_config", "systemd_unit"} and not item["ok"]:
-                item.update({"ok": True, "repaired": True, "solution": None})
-    record("generated_configuration", artifacts_ok, "System, sing-box, and systemd configuration are synchronized.", True, artifacts_repaired)
+                item.update({
+                    "ok": True,
+                    "repaired": True,
+                    "solution": None,
+                    "detail": human("The missing generated file was recreated and synchronized.", "缺失的生成文件已重新创建，并与当前用户配置同步。"),
+                })
+    record("generated_configuration", artifacts_ok, human("User, system, sing-box, and systemd configurations agree.", "用户配置、系统配置、sing-box 配置和 systemd 服务一致。") if artifacts_ok else human("Generated configuration is missing or does not match the current user settings.", "生成配置缺失，或系统配置、sing-box 配置与当前用户设置不一致。"), True, artifacts_repaired)
 
     tun_exists = Path(f"/sys/class/net/{TUN_INTERFACE}").exists()
     tun_ok = active or not tun_exists
@@ -1151,12 +1240,30 @@ def diagnose(config_path: Path | None = None, repair: bool = False) -> dict[str,
         cleanup_runtime_network_state()
         tun_repaired = True
         checks["repairs"].append("stale_tun_removed")
-    record("tun_interface", tun_ok, "TUN interface state matches the service state.", True, tun_repaired)
+    record("tun_interface", tun_ok, human("The transparent-proxy interface state is correct.", "透明代理网络接口状态正确。") if tun_ok else human(f"Interface {TUN_INTERFACE} still exists although the service is stopped.", f"代理服务已停止，但网络接口 {TUN_INTERFACE} 仍然存在。"), True, tun_repaired)
 
     nft = run(["nft", "list", "table", TRAFFIC_TABLE_FAMILY, TRAFFIC_TABLE_NAME], check=False) if shutil.which("nft") else None
-    nft_ok = not active or bool(nft and nft.returncode == 0)
+    nft_exists = bool(nft and nft.returncode == 0)
+    nft_ok = nft_exists if active else not nft_exists
     nft_repaired = artifacts_repaired and active
-    record("traffic_accounting", nft_ok, "Traffic accounting table is available when the service is active.", bool(proxy_config), nft_repaired)
+    if repair and not active and nft_exists:
+        cleanup_traffic_accounting()
+        nft_repaired = True
+        checks["repairs"].append("stale_traffic_accounting_removed")
+    nft_failure = human(f"The service is running but nftables table {TRAFFIC_TABLE_NAME} is missing.", f"代理服务正在运行，但 nftables 表 {TRAFFIC_TABLE_NAME} 不存在，流量统计将不可用。") if active else human(f"The service is stopped but nftables table {TRAFFIC_TABLE_NAME} still exists.", f"代理服务已停止，但 nftables 表 {TRAFFIC_TABLE_NAME} 仍然存在，属于运行状态残留。")
+    record("traffic_accounting", nft_ok, human("Traffic accounting state matches the service state.", "流量统计规则与服务状态一致。") if nft_ok else nft_failure, bool(proxy_config), nft_repaired)
+
+    dns_status = run(["resolvectl", "status", TUN_INTERFACE], check=False) if shutil.which("resolvectl") else None
+    stale_dns = not active and bool(dns_status and dns_status.returncode == 0)
+    dns_repaired = False
+    if repair and stale_dns:
+        try:
+            run(["resolvectl", "revert", TUN_INTERFACE], check=False)
+            dns_repaired = True
+            checks["repairs"].append("stale_runtime_dns_removed")
+        except FileNotFoundError:
+            pass
+    record("runtime_dns", not stale_dns, human("No stale per-interface DNS state was found.", "没有发现接口级 DNS 残留。") if not stale_dns else human(f"The service is stopped but systemd-resolved still has DNS state for {TUN_INTERFACE}.", f"代理服务已停止，但 systemd-resolved 中仍保留 {TUN_INTERFACE} 的 DNS 状态。"), True, dns_repaired)
 
     web_ok = False
     web_error = None
@@ -1167,7 +1274,7 @@ def diagnose(config_path: Path | None = None, repair: bool = False) -> dict[str,
         web_error = web.stderr.strip() if not web_ok else None
     checks["proxy_http_test"] = "ok" if web_ok else "failed"
     checks["proxy_http_error"] = web_error
-    record("proxy_http_request", web_ok, "An HTTPS request succeeds through the configured proxy.")
+    record("proxy_http_request", web_ok, human("A real HTTPS request succeeded through the proxy.", "已通过代理成功完成真实 HTTPS 请求。") if web_ok else human(f"The proxy port check was not enough: the HTTPS request failed. {web_error or 'TCP connection was unavailable.'}", f"仅端口检测不足：通过代理发起 HTTPS 请求失败。{web_error or '代理 TCP 连接不可用。'}"))
 
     if not target:
         checks["advice"].append("No proxy host is configured and no default gateway was detected.")
@@ -1197,11 +1304,12 @@ def discover() -> dict[str, Any]:
 def uninstall() -> None:
     require_root()
     run(["systemctl", "disable", "--now", "vm-proxy-gateway.service"], check=False)
-    run(["nft", "delete", "table", TRAFFIC_TABLE_FAMILY, TRAFFIC_TABLE_NAME], check=False)
+    cleanup_runtime_network_state()
+    cleanup_traffic_accounting()
     if SYSTEMD_UNIT.exists():
         SYSTEMD_UNIT.unlink()
     run(["systemctl", "daemon-reload"], check=False)
-    reconcile_shell_proxy(user_home_for_config(default_user_config_path()), None)
+    cleanup_managed_shell_for_all_users()
     # Keep /etc/vm-proxy-gateway for diagnostics and deliberate re-install reuse.
 
 

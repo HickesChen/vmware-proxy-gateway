@@ -1355,7 +1355,7 @@ def main() -> int:
             print(json.dumps(discover(), indent=2, sort_keys=True))
         elif args.command == "uninstall":
             uninstall()
-            print("Service uninstalled. System config was kept in /etc/vm-proxy-gateway.")
+            print("Service and managed runtime state were cleaned.")
         return 0
     except (GatewayError, subprocess.CalledProcessError, OSError, json.JSONDecodeError) as exc:
         print(f"error: {exc}", file=sys.stderr)

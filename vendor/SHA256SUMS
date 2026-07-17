@@ -1,0 +1,11 @@
+fb27edb161bf04052b179b3524e38867c97e39311595a2637c30aae82a66f90f  ./README.md
+4cc0db68cd9ab8f3ee6039f3aa2c9eec182cb6f3af9b37100a1972e7898b9f5d  ./THIRD_PARTY.md
+c44c90bf869c9fadb12015afb65178c0346ecb3b88ac1a78b40addadf874c45b  ./debs/noble/amd64/curl_8.5.0-2ubuntu10.11_amd64.deb
+27152eb8b489d6b2ce3f2a839f353135ed24be4e3417c35bef8b15fd6b342893  ./debs/noble/amd64/gir1.2-ayatanaappindicator3-0.1_0.5.93-1build3_amd64.deb
+fcaee001747a6adaa0cd9337fef437b3aa7a7a6d5246b62fbd4784d3d6a5009e  ./debs/noble/amd64/libnftables1_1.0.9-1ubuntu0.1_amd64.deb
+e5bde5c9cbb95082700011f0b7ef2c0a41900b0a9fd7434f6e90448e2a7b4e50  ./debs/noble/amd64/libnftnl11_1.2.6-2build1_amd64.deb
+d648859fccde3c17b8b9b89993427564f91f394a39306db1f67bd5ea3ac42c6e  ./debs/noble/amd64/nftables_1.0.9-1ubuntu0.1_amd64.deb
+a0c2229d02cf87207297c22d86ffc57c86c227517b038c0d3c59df79295ac617  ./python/pystray-0.19.5-py2.py3-none-any.whl
+c3534038d42e0df2f1392a1b30a15a4ff5fdc2b86cfa94f072bf11b10a164398  ./python/python_xlib-0.33-py2.py3-none-any.whl
+4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274  ./python/six-1.17.0-py2.py3-none-any.whl
+69538d4da882e4381cf57c3a057e4a953c41f4f8aadfa978600b96c810f97f82  ./sing-box/1.10.7/linux-amd64/sing-box

@@ -22,6 +22,10 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Callable
 
+BUNDLED_PYTHON = Path(__file__).resolve().parent / "vendor-python"
+if BUNDLED_PYTHON.is_dir():
+    sys.path.insert(0, str(BUNDLED_PYTHON))
+
 try:
     import pystray
 except Exception:

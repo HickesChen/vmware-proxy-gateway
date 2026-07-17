@@ -2,6 +2,18 @@
 
 [简体中文](CHANGELOG.zh-CN.md)
 
+## 0.1.10
+
+- Added managed Shell proxy lifecycle handling, stale VS Code Server detection,
+  automatic diagnosis repairs, and human-readable failure guidance.
+- Hardened stop, safe-exit, and uninstall cleanup for Shell settings, TUN/DNS
+  state, nftables accounting, autostart files, user configuration, and owned
+  sing-box installations, with post-uninstall residue verification.
+- Added a bundled Noble/amd64 offline runtime, private Python dependency loading,
+  checksum verification, and minimal platform-mismatch download fallback without
+  target-side pip usage.
+- Expanded scenario validation to 23 checks.
+
 ## 0.1.5
 
 - Hardened runtime configuration for domain proxy hosts, invalid proxy ports,

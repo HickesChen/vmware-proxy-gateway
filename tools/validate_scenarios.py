@@ -582,6 +582,29 @@ def test_sing_box_config_shape() -> None:
             tmp.unlink(missing_ok=True)
 
 
+def test_offline_bundle_layout() -> None:
+    vendor = ROOT / "vendor"
+    manifest = vendor / "SHA256SUMS"
+    assert manifest.exists()
+    entries = [line.split(maxsplit=1)[1].lstrip("*") for line in manifest.read_text(encoding="utf-8").splitlines()]
+    assert entries
+    assert all(".." not in Path(entry).parts and vendor.joinpath(entry).is_file() for entry in entries)
+    assert any(entry.endswith(".whl") for entry in entries)
+    assert any(entry.endswith(".deb") for entry in entries)
+    assert any(entry.endswith("/sing-box") for entry in entries)
+    installer = ROOT.joinpath("install.sh").read_text(encoding="utf-8")
+    assert "--offline" in installer
+    assert "--no-download" in installer
+    assert "--offline" in installer
+    assert 'OFFLINE_ONLY="${VM_PROXY_GATEWAY_OFFLINE_ONLY:-0}"' in installer
+    assert "pip install" not in installer
+    assert '"${missing[@]}"' in installer
+    assert "--no-install-recommends" in installer
+    assert "vendor-python" in installer
+    gui_source = GUI.read_text(encoding="utf-8")
+    assert "BUNDLED_PYTHON" in gui_source
+
+
 def main() -> int:
     checks = [
         ("dns_from_resolvectl", test_dns_from_resolvectl),
@@ -606,6 +629,7 @@ def main() -> int:
         ("single_instance_lock", test_single_instance_lock),
         ("active_tray_icon_tint", test_active_tray_icon_tint),
         ("sing_box_config_shape", test_sing_box_config_shape),
+        ("offline_bundle_layout", test_offline_bundle_layout),
     ]
     for name, func in checks:
         check(name, func)

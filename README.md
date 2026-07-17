@@ -99,6 +99,16 @@ separately, or your organization does not allow NOPASSWD sudoers rules. The
 installer tries dependency installation first and only refreshes APT metadata if
 that fails.
 
+### Fully offline installation
+
+On a connected build machine with the same Ubuntu release and CPU architecture as the target VM, run `tools/prepare_offline_bundle.sh`. Include the generated `vendor/` directory with the project, then run `sudo ./install.sh --offline` on the target. Offline mode verifies `vendor/SHA256SUMS` and never uses APT repositories, pip indexes, or download URLs.
+
+Release bundles already contain these files, so normal `sudo ./install.sh` uses no network on a matching platform. If no OS/architecture bundle matches, normal installation downloads only the missing application packages and matching sing-box binary. `sudo ./install.sh --offline` is strict and fails instead. The target never uses pip: bundled pure-Python wheels are extracted with Python's standard library into `/opt/vm-proxy-gateway/vendor-python/`.
+
+The pinned pystray, python-xlib, and six wheels are committed application resources. The bundle preparation script verifies them and does not contact PyPI; dependency upgrades are performed separately and deliberately.
+
+The bundle intentionally excludes the Ubuntu Desktop Minimal baseline: Bash/coreutils, Python 3, systemd, APT/dpkg, iproute2, GTK/Tk, CA certificates, archive tools, libc, and standard system fonts. The installer reports any missing baseline prerequisite instead of redistributing the operating system itself.
+
 ## First run
 
 1. Choose **English**, **简体中文**, or **繁體中文** from the language selector.
@@ -302,6 +312,7 @@ sudo ./uninstall.sh
 ```
 
 The uninstall script removes the application files, command symlinks, desktop
-entry, installed icons, systemd unit, sudoers rule, and `/etc/vm-proxy-gateway`.
-It leaves `~/.config/vm-proxy-gateway/` in your home directory so your personal
-GUI preferences are not deleted unexpectedly.
+entry, installed icons, owned sing-box binary, systemd unit, sudoers rule,
+`/etc/vm-proxy-gateway`, per-user configuration, autostart entries, Shell proxy
+blocks, TUN/DNS state, and nftables rules. It verifies that no managed runtime
+or configuration residue remains and exits with an error if cleanup is incomplete.

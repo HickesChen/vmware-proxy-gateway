@@ -16,4 +16,8 @@ build/
 .DS_Store
 .gitignore
 mynettestcode/
+!vendor/**/*.tar.gz
+!vendor/**/*.whl
+!vendor/**/*.deb
+!vendor/**/sing-box
 .codex

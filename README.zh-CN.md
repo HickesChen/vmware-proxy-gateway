@@ -71,6 +71,29 @@ sudo ./install.sh --no-sudoers
 
 这些选项适合依赖已安装、sing-box 由你自己管理，或组织不允许 NOPASSWD sudoers 规则的场景。安装器会先直接安装依赖，只有依赖安装失败时才刷新一次 APT 元数据并重试。
 
+### 完全离线安装
+
+在一台与目标虚拟机使用相同 Ubuntu 版本和 CPU 架构、且可以联网的构建机器上运行：
+
+```bash
+chmod +x tools/prepare_offline_bundle.sh
+tools/prepare_offline_bundle.sh
+```
+
+脚本会准备当前平台额外需要的 Ubuntu `.deb` 和对应架构的 sing-box，并生成 `SHA256SUMS`。pystray、python-xlib、six 已作为固定版本资源保存在仓库中，准备脚本只检查文件是否齐全，不访问 PyPI，也不会重新下载或替换它们。将填充后的整个仓库复制到离线虚拟机，然后运行：
+
+```bash
+sudo ./install.sh --offline
+```
+
+正式发布包已经包含这些资源，因此匹配平台的普通用户只需运行 `sudo ./install.sh`，整个过程使用本地资源。如果 Ubuntu 版本或 CPU 架构没有匹配的 bundle，普通安装会只下载当前缺失的应用包和对应架构的 sing-box，不重复下载系统已有组件，也不会使用 pip。`sudo ./install.sh --offline` 是严格离线模式：资源不匹配时直接说明缺少的发布包，绝不联网。
+
+离线模式禁止 APT、pip 和 curl 访问网络。安装前会校验资源哈希；如果当前 Ubuntu 代号或架构没有对应 bundle，会立即说明缺少哪个目录，不会安装到一半才失败。系统已经提供的依赖不会重复安装。
+
+离线包不会重复封装 Ubuntu Desktop Minimal 必定提供的基础组件，包括 Bash/coreutils、Python 3、systemd、APT/dpkg、iproute2、GTK/Tk、CA 证书、tar/gzip/unzip、libc 和系统基础字体。目标机需要先具备完整且未损坏的 Ubuntu Desktop 基础环境；如果这些基础组件缺失，安装器会列出缺失包并提前终止。仓库只携带本软件额外需要的包。
+
+目标机不需要安装 pip、setuptools 或 wheel。pystray、python-xlib 和 six 会由安装器使用 Python 标准库解包到 `/opt/vm-proxy-gateway/vendor-python/`，不会写入系统 Python，也不会与用户通过 pip 管理的包互相覆盖。升级时旧的应用私有依赖目录会随 `/opt/vm-proxy-gateway` 一起删除后重建；卸载时会完整移除。旧版本如果曾在系统 Python 中安装 pystray，卸载器不会擅自删除，因为该包可能同时被其他应用使用，但新版程序不会再依赖它。
+
 ## 首次使用
 
 1. 在语言选择中选择 **English**、**简体中文** 或 **繁體中文**。
@@ -228,4 +251,4 @@ sudo systemctl disable vm-proxy-gateway.service
 sudo ./uninstall.sh
 ```
 
-卸载脚本会删除应用文件、命令符号链接、桌面入口、图标、systemd unit、sudoers 规则和 `/etc/vm-proxy-gateway`。它会保留 `~/.config/vm-proxy-gateway/`，避免意外删除你的个人 GUI 偏好。
+卸载脚本会删除应用文件、命令符号链接、桌面入口、图标、本软件安装的 sing-box、systemd unit、sudoers 规则、`/etc/vm-proxy-gateway`、各用户配置、自动启动项、Shell 托管代理块、TUN/DNS 状态和 nftables 规则。卸载结束前会复验；仍有任何托管配置或运行状态残留时会报错退出，不再打印误导性的成功信息。

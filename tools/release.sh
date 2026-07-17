@@ -95,7 +95,7 @@ if [[ -n "${upstream}" ]]; then
   local_head="$(git rev-parse HEAD)"
   remote_head="$(git rev-parse "${upstream}")"
   merge_base="$(git merge-base HEAD "${upstream}")"
-  if [[ "${local_head}" != "${remote_head}" && "${local_head}" != "${merge_base}" ]]; then
+  if [[ "${local_head}" != "${merge_base}" && "${remote_head}" != "${merge_base}" ]]; then
     die "Local branch and ${upstream} have diverged. Pull/rebase before releasing."
   fi
   if [[ "${local_head}" == "${merge_base}" && "${local_head}" != "${remote_head}" ]]; then

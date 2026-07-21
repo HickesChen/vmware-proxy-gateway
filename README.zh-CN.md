@@ -110,6 +110,24 @@ sudo ./install.sh --offline
 
 托盘菜单操作会弹出结果提示，因此不打开主窗口也能知道开启、关闭、测试或诊断是否成功。
 
+## 代理残留扫描与选择性清理
+
+点击 **代理残留** 后，程序会在后台扫描常见持久化代理配置并显示进度。扫描范围包括 VS Code/VSCodium、Cursor、Codex、常见 AI 编码工具、Shell 环境、Git、npm/Yarn/pnpm、pip、Gradle、JetBrains IDE、curl/wget、Docker、systemd 服务环境、桌面启动器，以及常见项目目录中的 `.vscode` 和 `.cursor` 工作区设置。
+
+扫描完成后会列出软件名称、配置文件完整路径、行号和脱敏后的匹配内容。默认不会选中任何项目；用户可以逐项勾选，也可以全选，然后点击 **清理选中项**。清理时会再次核对文件哈希；如果文件在扫描后发生变化，该文件会被跳过并要求重新扫描。修改前的文件备份保存在：
+
+```text
+~/.config/vm-proxy-gateway/proxy-cleanup-backups/<UTC 时间>/
+```
+
+匹配规则独立保存在安装目录的 `proxy_residue_rules.json`。如需反复调整或添加匹配方式，可以创建：
+
+```text
+~/.config/vm-proxy-gateway/proxy-residue-rules.json
+```
+
+用户规则通过 `id` 替换同名默认规则，也可以用新 `id` 增加规则；设置 `"enabled": false` 可关闭同名规则，设置顶层 `"replace_defaults": true` 可完全替换默认集合。为了保证管理员清理操作安全，用户规则的 `paths` 只能使用 `{home}/...` 范围。规则可用 `"cleanup": "remove_line"` 删除独立配置行，也可用 `"cleanup": "regex_substitute"` 配合 `"replacement"` 只替换行内匹配片段。带用户名或密码的代理 URL 在结果界面中会自动脱敏。
+
 ## 代理测试
 
 **测试** 会检查两件事：

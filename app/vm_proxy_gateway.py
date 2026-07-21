@@ -25,6 +25,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from proxy_residue import ResidueError, clean_proxy_residue, scan_proxy_residue
+
 
 APP_NAME = "vm-proxy-gateway"
 SYSTEM_DIR = Path("/etc/vm-proxy-gateway")
@@ -1313,6 +1315,23 @@ def uninstall() -> None:
     # Keep /etc/vm-proxy-gateway for diagnostics and deliberate re-install reuse.
 
 
+def read_cleanup_selection(path: Path) -> list[dict[str, Any]]:
+    data = read_json(path)
+    selected = data.get("selected")
+    if not isinstance(selected, list):
+        raise GatewayError("Cleanup selection must contain a selected list.")
+    return selected
+
+
+def validate_cli_user_home(home: Path) -> Path:
+    """Restrict privileged residue operations to a real, non-root login home."""
+    resolved = home.resolve(strict=True)
+    matches = [entry for entry in pwd.getpwall() if entry.pw_uid >= 1000 and Path(entry.pw_dir).resolve() == resolved]
+    if not matches:
+        raise GatewayError(f"Not a recognized login user home: {home}")
+    return resolved
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=APP_NAME)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1329,6 +1348,11 @@ def main() -> int:
     p_diagnose = sub.add_parser("diagnose")
     p_diagnose.add_argument("--config", type=Path)
     p_diagnose.add_argument("--repair", action="store_true")
+    p_residue_scan = sub.add_parser("proxy-residue-scan")
+    p_residue_scan.add_argument("--home", required=True, type=Path)
+    p_residue_clean = sub.add_parser("proxy-residue-clean")
+    p_residue_clean.add_argument("--home", required=True, type=Path)
+    p_residue_clean.add_argument("--selection", required=True, type=Path)
     args = parser.parse_args()
 
     try:
@@ -1351,13 +1375,24 @@ def main() -> int:
             print(json.dumps(test_network(args.config), indent=2, sort_keys=True))
         elif args.command == "diagnose":
             print(json.dumps(diagnose(args.config, repair=args.repair), indent=2, sort_keys=True))
+        elif args.command == "proxy-residue-scan":
+            home = validate_cli_user_home(args.home) if is_root() else args.home
+            print(json.dumps(scan_proxy_residue(home), indent=2, sort_keys=True))
+        elif args.command == "proxy-residue-clean":
+            require_root()
+            home = validate_cli_user_home(args.home)
+            expected_selection = home / ".config" / "vm-proxy-gateway" / "proxy-cleanup-selection.json"
+            if args.selection.is_symlink() or args.selection.resolve(strict=True) != expected_selection.resolve(strict=True):
+                raise GatewayError(f"Cleanup selection must be {expected_selection}")
+            selected = read_cleanup_selection(args.selection)
+            print(json.dumps(clean_proxy_residue(home, selected), indent=2, sort_keys=True))
         elif args.command == "discover":
             print(json.dumps(discover(), indent=2, sort_keys=True))
         elif args.command == "uninstall":
             uninstall()
             print("Service and managed runtime state were cleaned.")
         return 0
-    except (GatewayError, subprocess.CalledProcessError, OSError, json.JSONDecodeError) as exc:
+    except (GatewayError, ResidueError, subprocess.CalledProcessError, OSError, json.JSONDecodeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 

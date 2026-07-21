@@ -1,0 +1,151 @@
+{
+  "schema_version": 1,
+  "description": "Replace or extend these rules in ~/.config/vm-proxy-gateway/proxy-residue-rules.json.",
+  "rules": [
+    {
+      "id": "vscode-settings",
+      "application": "VS Code / VSCodium",
+      "paths": [
+        "{home}/.config/Code/User/settings.json",
+        "{home}/.config/Code - Insiders/User/settings.json",
+        "{home}/.config/VSCodium/User/settings.json",
+        "{home}/.vscode-server/data/Machine/settings.json",
+        "{home}/.vscode-server-insiders/data/Machine/settings.json",
+        "{home}/snap/code/*/.config/Code/User/settings.json",
+        "{home}/Desktop/**/.vscode/settings.json",
+        "{home}/Documents/**/.vscode/settings.json",
+        "{home}/Projects/**/.vscode/settings.json",
+        "{home}/projects/**/.vscode/settings.json",
+        "{home}/workspace/**/.vscode/settings.json",
+        "{home}/src/**/.vscode/settings.json"
+      ],
+      "pattern": "(?i)^\\s*\\\"(?:http\\.proxy|https\\.proxy|http\\.proxyAuthorization|http\\.proxySupport|http\\.systemCertificates)\\\"\\s*:",
+      "cleanup": "remove_line"
+    },
+    {
+      "id": "cursor-settings",
+      "application": "Cursor",
+      "paths": [
+        "{home}/.config/Cursor/User/settings.json",
+        "{home}/.cursor-server/data/Machine/settings.json",
+        "{home}/.cursor-server/data/User/settings.json",
+        "{home}/Desktop/**/.cursor/settings.json",
+        "{home}/Documents/**/.cursor/settings.json",
+        "{home}/Projects/**/.cursor/settings.json",
+        "{home}/projects/**/.cursor/settings.json",
+        "{home}/workspace/**/.cursor/settings.json",
+        "{home}/src/**/.cursor/settings.json"
+      ],
+      "pattern": "(?i)^\\s*\\\"(?:http\\.proxy|https\\.proxy|http\\.proxyAuthorization|http\\.proxySupport|http\\.systemCertificates)\\\"\\s*:",
+      "cleanup": "remove_line"
+    },
+    {
+      "id": "codex-config",
+      "application": "Codex",
+      "paths": [
+        "{home}/.codex/config.toml",
+        "{home}/.codex/*.json",
+        "{home}/.config/codex/config.toml",
+        "{home}/.config/codex/*.json"
+      ],
+      "pattern": "(?i)^\\s*(?:\\\"?(?:http|https|all|no)_proxy\\\"?|proxy|proxy_url)\\s*[:=]",
+      "cleanup": "remove_line"
+    },
+    {
+      "id": "ai-coding-tools",
+      "application": "AI coding tools",
+      "paths": [
+        "{home}/.claude/settings.json",
+        "{home}/.claude/settings.local.json",
+        "{home}/.gemini/settings.json",
+        "{home}/.continue/config.json",
+        "{home}/.continue/config.yaml"
+      ],
+      "pattern": "(?i)^\\s*[\\\"']?(?:http_proxy|https_proxy|all_proxy|no_proxy|proxy|proxy_url)[\\\"']?\\s*[:=]",
+      "cleanup": "remove_line"
+    },
+    {
+      "id": "shell-environment",
+      "application": "Shell environment",
+      "paths": [
+        "{home}/.profile",
+        "{home}/.bashrc",
+        "{home}/.bash_profile",
+        "{home}/.zshrc",
+        "{home}/.config/fish/config.fish",
+        "/etc/environment",
+        "/etc/profile",
+        "/etc/profile.d/*.sh"
+      ],
+      "pattern": "(?i)^\\s*(?:export\\s+|set\\s+-[gx]+\\s+)?(?:http_proxy|https_proxy|all_proxy|ftp_proxy|no_proxy)\\b\\s*(?:=|\\s)",
+      "cleanup": "remove_line"
+    },
+    {
+      "id": "git-config",
+      "application": "Git",
+      "paths": ["{home}/.gitconfig", "{home}/.config/git/config", "/etc/gitconfig"],
+      "pattern": "(?i)^\\s*(?:proxy|httpProxy|httpsProxy)\\s*=",
+      "cleanup": "remove_line"
+    },
+    {
+      "id": "node-package-managers",
+      "application": "npm / Yarn / pnpm",
+      "paths": ["{home}/.npmrc", "{home}/.yarnrc", "{home}/.yarnrc.yml", "{home}/.config/pnpm/rc"],
+      "pattern": "(?i)^\\s*(?:proxy|https-proxy|httpProxy|httpsProxy|no-proxy)\\s*[:=]",
+      "cleanup": "remove_line"
+    },
+    {
+      "id": "python-pip",
+      "application": "pip",
+      "paths": ["{home}/.config/pip/pip.conf", "{home}/.pip/pip.conf", "/etc/pip.conf"],
+      "pattern": "(?i)^\\s*proxy\\s*=",
+      "cleanup": "remove_line"
+    },
+    {
+      "id": "jvm-build-tools",
+      "application": "Gradle / JVM tools",
+      "paths": ["{home}/.gradle/gradle.properties", "{home}/.m2/toolchains.xml"],
+      "pattern": "(?i)^\\s*(?:systemProp\\.)?(?:http|https)\\.proxy(?:Host|Port|User|Password)\\s*=",
+      "cleanup": "remove_line"
+    },
+    {
+      "id": "jetbrains-ides",
+      "application": "JetBrains IDEs",
+      "paths": ["{home}/.config/JetBrains/*/options/proxy.settings.xml", "{home}/.config/Google/*/options/proxy.settings.xml"],
+      "pattern": "(?i)^\\s*<option\\s+name=\\\"(?:PROXY_TYPE|PROXY_HOST|PROXY_PORT|PROXY_AUTHENTICATION|PROXY_LOGIN|PROXY_PASSWORD)\\\"",
+      "cleanup": "remove_line"
+    },
+    {
+      "id": "download-tools",
+      "application": "curl / wget",
+      "paths": ["{home}/.curlrc", "{home}/.wgetrc", "/etc/wgetrc"],
+      "pattern": "(?i)^\\s*(?:proxy|http_proxy|https_proxy|ftp_proxy|use_proxy)\\s*=",
+      "cleanup": "remove_line"
+    },
+    {
+      "id": "container-proxy",
+      "application": "Docker",
+      "paths": [
+        "{home}/.docker/config.json",
+        "/etc/docker/daemon.json"
+      ],
+      "pattern": "(?i)^\\s*\\\"(?:httpProxy|httpsProxy|noProxy)\\\"\\s*:",
+      "cleanup": "remove_line"
+    },
+    {
+      "id": "desktop-app-launchers",
+      "application": "Desktop launchers",
+      "paths": ["{home}/.local/share/applications/*.desktop", "{home}/.config/autostart/*.desktop"],
+      "pattern": "(?i)\\s+(?:(?:--proxy-server|--proxy-pac-url)=(?:\\\"[^\\\"]*\\\"|'[^']*'|\\S+)|(?:http_proxy|https_proxy)=(?:\\\"[^\\\"]*\\\"|'[^']*'|\\S+))",
+      "cleanup": "regex_substitute",
+      "replacement": ""
+    },
+    {
+      "id": "systemd-service-environment",
+      "application": "systemd services",
+      "paths": ["{home}/.config/systemd/user/**/*.conf", "/etc/systemd/system/**/*.conf"],
+      "pattern": "(?i)^\\s*Environment\\s*=.*(?:HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY)=",
+      "cleanup": "remove_line"
+    }
+  ]
+}

@@ -248,6 +248,8 @@ install_files() {
   mkdir -p "${APP_DIR}"
   install -m 0755 "app/vm_proxy_gateway.py" "${APP_DIR}/vm_proxy_gateway.py"
   install -m 0755 "app/vm_proxy_gateway_gui.py" "${APP_DIR}/vm_proxy_gateway_gui.py"
+  install -m 0644 "app/proxy_residue.py" "${APP_DIR}/proxy_residue.py"
+  install -m 0644 "app/proxy_residue_rules.json" "${APP_DIR}/proxy_residue_rules.json"
   install -m 0644 "README.md" "${APP_DIR}/README.md"
   install -m 0644 "README.zh-CN.md" "${APP_DIR}/README.zh-CN.md"
   install -m 0644 "LICENSE" "${APP_DIR}/LICENSE"
@@ -299,6 +301,8 @@ install_sudoers() {
 %sudo ALL=(root) NOPASSWD: /usr/bin/python3 /opt/vm-proxy-gateway/vm_proxy_gateway.py restart
 %sudo ALL=(root) NOPASSWD: /usr/bin/python3 /opt/vm-proxy-gateway/vm_proxy_gateway.py traffic-stats
 %sudo ALL=(root) NOPASSWD: /usr/bin/python3 /opt/vm-proxy-gateway/vm_proxy_gateway.py diagnose --config /home/*/.config/vm-proxy-gateway/config.json --repair
+%sudo ALL=(root) NOPASSWD: /usr/bin/python3 /opt/vm-proxy-gateway/vm_proxy_gateway.py proxy-residue-scan --home /home/*
+%sudo ALL=(root) NOPASSWD: /usr/bin/python3 /opt/vm-proxy-gateway/vm_proxy_gateway.py proxy-residue-clean --home /home/* --selection /home/*/.config/vm-proxy-gateway/proxy-cleanup-selection.json
 %sudo ALL=(root) NOPASSWD: /usr/bin/python3 /opt/vm-proxy-gateway/vm_proxy_gateway.py uninstall
 EOF
   chmod 0440 "${SUDOERS_FILE}"

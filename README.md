@@ -134,6 +134,14 @@ Tray menu actions show a pop-up with the operation result, so you can tell
 whether turning the proxy on/off, testing, or diagnosis succeeded without
 reopening the main window.
 
+## Proxy residue scan and selective cleanup
+
+Click **Proxy Residue** to scan common persistent proxy settings in the background with a progress indicator. The default rules cover VS Code/VSCodium, Cursor, Codex, common AI coding tools, shell environments, Git, Node and Python package managers, Gradle, JetBrains IDEs, curl/wget, containers, systemd service environments, desktop launchers, and common `.vscode`/`.cursor` workspace locations.
+
+Results show the application, full configuration path, line number, and a credential-masked preview. Nothing is selected by default. Before cleaning, each file hash is checked again and the original is backed up below `~/.config/vm-proxy-gateway/proxy-cleanup-backups/`.
+
+Matching is data-driven. Create `~/.config/vm-proxy-gateway/proxy-residue-rules.json` to override rules by `id`, add rules, disable a rule with `"enabled": false`, or replace the complete default set with `"replace_defaults": true`. User rule paths are restricted to `{home}/...` for safe privileged cleanup. A rule can use `"cleanup": "remove_line"` for independent settings or `"cleanup": "regex_substitute"` with `"replacement"` for an inline proxy argument.
+
 The **Test** action checks two things:
 
 - whether `<host-ip>:<port>` accepts TCP connections;

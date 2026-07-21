@@ -10,6 +10,7 @@ import ipaddress
 import json
 import fcntl
 import os
+import queue
 import re
 import shutil
 import subprocess
@@ -617,6 +618,73 @@ TEXT = {
     },
 }
 
+TEXT["en"].update({
+    "residue_scan": "Proxy Residue",
+    "residue_title": "Proxy residue scanner",
+    "residue_scanning": "Scanning common proxy settings...",
+    "residue_cleaning": "Cleaning the selected settings...",
+    "residue_found": "Scanned {files} files with {rules} replaceable rules; found {count} proxy setting(s).",
+    "residue_none": "No persistent proxy residue was found in the configured locations.",
+    "residue_selected": "Selected {selected} of {total}",
+    "residue_select_all": "Select all",
+    "residue_select_none": "Clear selection",
+    "residue_clean": "Clean selected",
+    "residue_close": "Close",
+    "residue_column_selected": "Clean",
+    "residue_column_app": "Application",
+    "residue_column_path": "Configuration path",
+    "residue_column_line": "Line",
+    "residue_column_preview": "Matched setting",
+    "residue_confirm": "Clean {count} selected setting(s)? A backup will be created first.",
+    "residue_cleaned": "Cleaned {count} setting(s). Backup: {backup}",
+    "residue_partial": "Cleaned {cleaned}; failed {failed}. Backup: {backup}",
+    "residue_rules_hint": "Matching rules can be replaced or extended in {path}",
+})
+TEXT["zh_CN"].update({
+    "residue_scan": "代理残留",
+    "residue_title": "代理残留扫描",
+    "residue_scanning": "正在扫描常见软件和系统中的代理配置……",
+    "residue_cleaning": "正在清理选中的代理配置……",
+    "residue_found": "已使用 {rules} 条可替换规则扫描 {files} 个文件，找到 {count} 条代理配置。",
+    "residue_none": "在已配置的扫描位置中没有发现持久化代理残留。",
+    "residue_selected": "已选择 {selected} / {total} 条",
+    "residue_select_all": "全选",
+    "residue_select_none": "清空选择",
+    "residue_clean": "清理选中项",
+    "residue_close": "关闭",
+    "residue_column_selected": "清理",
+    "residue_column_app": "软件",
+    "residue_column_path": "配置路径",
+    "residue_column_line": "行号",
+    "residue_column_preview": "匹配内容",
+    "residue_confirm": "确定清理选中的 {count} 条配置吗？程序会先创建备份。",
+    "residue_cleaned": "已清理 {count} 条配置。备份位置：{backup}",
+    "residue_partial": "已清理 {cleaned} 条，失败 {failed} 条。备份位置：{backup}",
+    "residue_rules_hint": "可在此文件替换或扩展匹配规则：{path}",
+})
+TEXT["zh_TW"].update({
+    "residue_scan": "代理殘留",
+    "residue_title": "代理殘留掃描",
+    "residue_scanning": "正在掃描常見軟體和系統中的代理設定……",
+    "residue_cleaning": "正在清理選取的代理設定……",
+    "residue_found": "已使用 {rules} 條可替換規則掃描 {files} 個檔案，找到 {count} 條代理設定。",
+    "residue_none": "在已設定的掃描位置中沒有發現持久化代理殘留。",
+    "residue_selected": "已選取 {selected} / {total} 條",
+    "residue_select_all": "全選",
+    "residue_select_none": "清空選取",
+    "residue_clean": "清理選取項",
+    "residue_close": "關閉",
+    "residue_column_selected": "清理",
+    "residue_column_app": "軟體",
+    "residue_column_path": "設定路徑",
+    "residue_column_line": "行號",
+    "residue_column_preview": "符合內容",
+    "residue_confirm": "確定清理選取的 {count} 條設定嗎？程式會先建立備份。",
+    "residue_cleaned": "已清理 {count} 條設定。備份位置：{backup}",
+    "residue_partial": "已清理 {cleaned} 條，失敗 {failed} 條。備份位置：{backup}",
+    "residue_rules_hint": "可在此檔案替換或擴充符合規則：{path}",
+})
+
 
 def load_config() -> dict:
     if not USER_CONFIG.exists():
@@ -1009,6 +1077,7 @@ class App(tk.Tk):
         self._button(actions, "turn_off", self.turn_off, width=8).pack(side="left", padx=(0, 8))
         self._button(actions, "test", self.test, width=8).pack(side="left", padx=(0, 8))
         self._button(actions, "diagnose", self.diagnose, width=8).pack(side="left", padx=(0, 8))
+        self._button(actions, "residue_scan", self.open_residue_scanner, width=11).pack(side="left", padx=(0, 8))
         self._button(actions, "refresh", self.refresh_status, width=8).pack(side="left")
 
         speed = self._section(control_page, "section_speed")
@@ -2245,6 +2314,253 @@ class App(tk.Tk):
         healthy = command_ok and reachable and diagnostic_ok
         self._show_result(self.tr("log_diagnose"), command_ok, warning=command_ok and not healthy)
         self.maybe_notify_tray_action(ok=healthy)
+
+    def open_residue_scanner(self) -> None:
+        if not CONTROLLER.exists():
+            messagebox.showerror(APP_NAME, self.tr("status_missing_controller", path=CONTROLLER))
+            return
+        window = tk.Toplevel(self)
+        window.title(self.tr("residue_title"))
+        window.geometry("1040x600")
+        window.minsize(820, 480)
+        window.transient(self)
+        window.configure(bg="#f7f8fa")
+
+        body = ttk.Frame(window, padding=16, style="Page.TFrame")
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(2, weight=1)
+        status = tk.StringVar(value=self.tr("residue_scanning"))
+        ttk.Label(body, textvariable=status, style="PageField.TLabel", wraplength=980).grid(
+            row=0, column=0, sticky="ew", pady=(0, 8)
+        )
+        progress = ttk.Progressbar(body, mode="indeterminate")
+        progress.grid(row=1, column=0, sticky="ew", pady=(0, 12))
+        progress.start(12)
+
+        table = ttk.Frame(body, style="Table.TFrame", padding=1)
+        table.grid(row=2, column=0, sticky="nsew")
+        table.columnconfigure(0, weight=1)
+        table.rowconfigure(0, weight=1)
+        tree = ttk.Treeview(
+            table,
+            columns=("selected", "application", "path", "line", "preview"),
+            show="headings",
+            selectmode="browse",
+        )
+        headings = {
+            "selected": "residue_column_selected",
+            "application": "residue_column_app",
+            "path": "residue_column_path",
+            "line": "residue_column_line",
+            "preview": "residue_column_preview",
+        }
+        for column, key in headings.items():
+            tree.heading(column, text=self.tr(key))
+        tree.column("selected", width=55, minwidth=50, stretch=False, anchor="center")
+        tree.column("application", width=145, minwidth=110, stretch=False)
+        tree.column("path", width=390, minwidth=220, stretch=True)
+        tree.column("line", width=55, minwidth=45, stretch=False, anchor="center")
+        tree.column("preview", width=330, minwidth=180, stretch=True)
+        scrollbar = ttk.Scrollbar(table, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=scrollbar.set)
+        tree.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+
+        footer = ttk.Frame(body, style="Page.TFrame")
+        footer.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+        selection_status = tk.StringVar(value=self.tr("residue_selected", selected=0, total=0))
+        ttk.Label(footer, textvariable=selection_status, style="TableSummary.TLabel").pack(side="left")
+        close_button = ttk.Button(footer, text=self.tr("residue_close"), command=window.destroy)
+        close_button.pack(side="right")
+        clean_button = ttk.Button(footer, text=self.tr("residue_clean"), style="Danger.TButton", state="disabled")
+        clean_button.pack(side="right", padx=(0, 8))
+        clear_button = ttk.Button(footer, text=self.tr("residue_select_none"), state="disabled")
+        clear_button.pack(side="right", padx=(0, 8))
+        all_button = ttk.Button(footer, text=self.tr("residue_select_all"), state="disabled")
+        all_button.pack(side="right", padx=(0, 8))
+
+        state: dict[str, object] = {"findings": [], "selected": set(), "queue": queue.Queue(), "busy": True}
+
+        def close_window() -> None:
+            if not state["busy"]:
+                window.destroy()
+
+        close_button.configure(command=close_window)
+        window.protocol("WM_DELETE_WINDOW", close_window)
+
+        def update_selection_status() -> None:
+            selected = state["selected"]
+            findings = state["findings"]
+            selection_status.set(self.tr("residue_selected", selected=len(selected), total=len(findings)))
+            clean_button.configure(state="normal" if selected and not state["busy"] else "disabled")
+
+        def toggle(iid: str | None = None) -> None:
+            iid = iid or tree.focus()
+            if not iid or state["busy"]:
+                return
+            selected: set[str] = state["selected"]  # type: ignore[assignment]
+            if iid in selected:
+                selected.remove(iid)
+            else:
+                selected.add(iid)
+            values = list(tree.item(iid, "values"))
+            values[0] = "☑" if iid in selected else "☐"
+            tree.item(iid, values=values)
+            update_selection_status()
+
+        def toggle_event(event: tk.Event | None = None) -> str:
+            iid = tree.identify_row(event.y) if event is not None and hasattr(event, "y") else tree.focus()
+            toggle(iid)
+            return "break"
+
+        def click_checkbox(event: tk.Event) -> str | None:
+            if tree.identify_column(event.x) == "#1":
+                toggle(tree.identify_row(event.y))
+                return "break"
+            return None
+
+        def select_all(enabled: bool) -> None:
+            selected: set[str] = state["selected"]  # type: ignore[assignment]
+            selected.clear()
+            if enabled:
+                selected.update(tree.get_children())
+            for iid in tree.get_children():
+                values = list(tree.item(iid, "values"))
+                values[0] = "☑" if enabled else "☐"
+                tree.item(iid, values=values)
+            update_selection_status()
+
+        tree.bind("<Double-1>", toggle_event)
+        tree.bind("<Button-1>", click_checkbox)
+        tree.bind("<space>", toggle_event)
+        all_button.configure(command=lambda: select_all(True))
+        clear_button.configure(command=lambda: select_all(False))
+
+        def start_job(command: str, extra: list[str], privileged: bool) -> None:
+            state["busy"] = True
+            progress.grid()
+            progress.start(12)
+            all_button.configure(state="disabled")
+            clear_button.configure(state="disabled")
+            clean_button.configure(state="disabled")
+            close_button.configure(state="disabled")
+
+            def worker() -> None:
+                result = run_controller(command, privileged=privileged, extra=extra)
+                job_queue: queue.Queue = state["queue"]  # type: ignore[assignment]
+                job_queue.put((command, result))
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def finish_scan(result: subprocess.CompletedProcess[str]) -> None:
+            if result.returncode != 0:
+                error = result.stderr.strip() or result.stdout.strip() or self.tr("operation_failed", error="")
+                status.set(error)
+                messagebox.showerror(self.tr("residue_title"), error, parent=window)
+                return
+            try:
+                data = json.loads(result.stdout)
+            except json.JSONDecodeError as exc:
+                status.set(str(exc))
+                return
+            findings = list(data.get("findings") or [])
+            state["findings"] = findings
+            state["selected"] = set()
+            for iid in tree.get_children():
+                tree.delete(iid)
+            for item in findings:
+                iid = str(item["id"])
+                tree.insert("", "end", iid=iid, values=(
+                    "☐", item.get("application"), item.get("path"), item.get("line"), item.get("preview")
+                ))
+            if findings:
+                status.set(self.tr(
+                    "residue_found",
+                    files=data.get("scanned_file_count", 0),
+                    rules=data.get("rule_count", 0),
+                    count=len(findings),
+                ) + "\n" + self.tr(
+                    "residue_rules_hint",
+                    path=Path.home() / ".config" / "vm-proxy-gateway" / "proxy-residue-rules.json",
+                ))
+                all_button.configure(state="normal")
+                clear_button.configure(state="normal")
+            else:
+                status.set(self.tr("residue_none"))
+            update_selection_status()
+
+        def finish_clean(result: subprocess.CompletedProcess[str]) -> None:
+            selection_file = state.pop("selection_file", None)
+            if selection_file:
+                Path(str(selection_file)).unlink(missing_ok=True)
+            if result.returncode != 0:
+                error = result.stderr.strip() or result.stdout.strip()
+                status.set(error)
+                messagebox.showerror(self.tr("residue_title"), error, parent=window)
+                return
+            try:
+                data = json.loads(result.stdout)
+            except json.JSONDecodeError as exc:
+                status.set(str(exc))
+                messagebox.showerror(self.tr("residue_title"), str(exc), parent=window)
+                return
+            cleaned = int(data.get("cleaned_count") or 0)
+            failed = int(data.get("failed_count") or 0)
+            backup = data.get("backup_path") or self.tr("unknown")
+            if failed:
+                message = self.tr("residue_partial", cleaned=cleaned, failed=failed, backup=backup)
+                messagebox.showwarning(self.tr("residue_title"), message, parent=window)
+            else:
+                message = self.tr("residue_cleaned", count=cleaned, backup=backup)
+                messagebox.showinfo(self.tr("residue_title"), message, parent=window)
+            status.set(message + "\n" + self.tr("residue_scanning"))
+            start_job("proxy-residue-scan", ["--home", str(Path.home())], True)
+
+        def poll_jobs() -> None:
+            if not window.winfo_exists():
+                return
+            job_queue: queue.Queue = state["queue"]  # type: ignore[assignment]
+            try:
+                command, result = job_queue.get_nowait()
+            except queue.Empty:
+                window.after(100, poll_jobs)
+                return
+            state["busy"] = False
+            progress.stop()
+            progress.grid_remove()
+            close_button.configure(state="normal")
+            if command == "proxy-residue-scan":
+                finish_scan(result)
+            else:
+                finish_clean(result)
+            if window.winfo_exists():
+                window.after(100, poll_jobs)
+
+        def clean_selected() -> None:
+            selected_ids: set[str] = state["selected"]  # type: ignore[assignment]
+            findings: list[dict] = state["findings"]  # type: ignore[assignment]
+            selected = [item for item in findings if item.get("id") in selected_ids]
+            if not selected or not messagebox.askyesno(
+                self.tr("residue_title"), self.tr("residue_confirm", count=len(selected)), parent=window
+            ):
+                return
+            USER_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+            selection_file = USER_CONFIG.parent / "proxy-cleanup-selection.json"
+            temporary = selection_file.with_suffix(".tmp")
+            temporary.write_text(json.dumps({"selected": selected}, ensure_ascii=False), encoding="utf-8")
+            temporary.replace(selection_file)
+            state["selection_file"] = str(selection_file)
+            status.set(self.tr("residue_cleaning"))
+            start_job(
+                "proxy-residue-clean",
+                ["--home", str(Path.home()), "--selection", str(selection_file)],
+                True,
+            )
+
+        clean_button.configure(command=clean_selected)
+        start_job("proxy-residue-scan", ["--home", str(Path.home())], True)
+        window.after(100, poll_jobs)
 
     def refresh_status(self, notify: bool = True) -> None:
         if not CONTROLLER.exists():

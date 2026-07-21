@@ -4,12 +4,14 @@ from __future__ import annotations
 import importlib.util
 import json
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTROLLER = ROOT / "app" / "vm_proxy_gateway.py"
 GUI = ROOT / "app" / "vm_proxy_gateway_gui.py"
+sys.path.insert(0, str(ROOT / "app"))
 
 
 def load_module(name: str, path: Path):
@@ -601,8 +603,87 @@ def test_offline_bundle_layout() -> None:
     assert '"${missing[@]}"' in installer
     assert "--no-install-recommends" in installer
     assert "vendor-python" in installer
+    assert "proxy_residue.py" in installer
+    assert "proxy_residue_rules.json" in installer
     gui_source = GUI.read_text(encoding="utf-8")
     assert "BUNDLED_PYTHON" in gui_source
+
+
+def test_proxy_residue_rules_scan_and_cleanup() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        home = Path(tmp)
+        settings = home / ".config" / "Code" / "User" / "settings.json"
+        settings.parent.mkdir(parents=True)
+        settings.write_text(
+            '{\n  "editor.fontSize": 14,\n  "http.proxy": "http://alice:secret@127.0.0.1:7890"\n}\n',
+            encoding="utf-8",
+        )
+        result = ctl.scan_proxy_residue(home)
+        matches = [item for item in result["findings"] if item["rule_id"] == "vscode-settings"]
+        assert len(matches) == 1
+        assert "secret" not in matches[0]["preview"]
+        assert "***:***@127.0.0.1:7890" in matches[0]["preview"]
+
+        cleaned = ctl.clean_proxy_residue(home, matches)
+        assert cleaned["cleaned_count"] == 1
+        assert cleaned["failed_count"] == 0
+        assert "http.proxy" not in settings.read_text(encoding="utf-8")
+        assert Path(cleaned["backup_path"]).joinpath("home/.config/Code/User/settings.json").exists()
+
+
+def test_proxy_residue_user_rule_replacement_and_stale_guard() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        home = Path(tmp)
+        config_dir = home / ".config" / "vm-proxy-gateway"
+        config_dir.mkdir(parents=True)
+        config_dir.joinpath("proxy-residue-rules.json").write_text(json.dumps({
+            "replace_defaults": True,
+            "rules": [{
+                "id": "custom-tool",
+                "application": "Custom tool",
+                "paths": ["{home}/.custom-proxy"],
+                "pattern": "(?i)^proxy_endpoint\\s*=",
+                "cleanup": "remove_line",
+            }],
+        }), encoding="utf-8")
+        target = home / ".custom-proxy"
+        target.write_text("proxy_endpoint=http://127.0.0.1:8080\nkeep=yes\n", encoding="utf-8")
+        result = ctl.scan_proxy_residue(home)
+        assert result["rule_count"] == 1
+        assert result["findings"][0]["application"] == "Custom tool"
+
+        target.write_text(target.read_text(encoding="utf-8") + "changed=yes\n", encoding="utf-8")
+        cleaned = ctl.clean_proxy_residue(home, result["findings"])
+        assert cleaned["cleaned_count"] == 0
+        assert cleaned["failed_count"] == 1
+        assert "proxy_endpoint" in target.read_text(encoding="utf-8")
+
+
+def test_proxy_residue_rejects_tampered_selection() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        home = Path(tmp)
+        shell = home / ".profile"
+        shell.write_text("keep=this-line\nexport HTTP_PROXY=http://127.0.0.1:8080\n", encoding="utf-8")
+        finding = next(item for item in ctl.scan_proxy_residue(home)["findings"] if item["path"] == str(shell))
+        finding["line"] = 1
+        cleaned = ctl.clean_proxy_residue(home, [finding])
+        assert cleaned["cleaned_count"] == 0
+        assert cleaned["failed_count"] == 1
+        assert shell.read_text(encoding="utf-8").startswith("keep=this-line")
+
+
+def test_proxy_residue_inline_cleanup_preserves_launcher() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        home = Path(tmp)
+        launcher = home / ".local" / "share" / "applications" / "editor.desktop"
+        launcher.parent.mkdir(parents=True)
+        launcher.write_text("[Desktop Entry]\nExec=editor --proxy-server=http://127.0.0.1:7890 --safe-mode\n", encoding="utf-8")
+        finding = next(item for item in ctl.scan_proxy_residue(home)["findings"] if item["path"] == str(launcher))
+        cleaned = ctl.clean_proxy_residue(home, [finding])
+        assert cleaned["cleaned_count"] == 1
+        content = launcher.read_text(encoding="utf-8")
+        assert "Exec=editor --safe-mode" in content
+        assert "proxy-server" not in content
 
 
 def main() -> int:
@@ -629,6 +710,10 @@ def main() -> int:
         ("single_instance_lock", test_single_instance_lock),
         ("active_tray_icon_tint", test_active_tray_icon_tint),
         ("sing_box_config_shape", test_sing_box_config_shape),
+        ("proxy_residue_rules_scan_and_cleanup", test_proxy_residue_rules_scan_and_cleanup),
+        ("proxy_residue_user_rule_replacement_and_stale_guard", test_proxy_residue_user_rule_replacement_and_stale_guard),
+        ("proxy_residue_rejects_tampered_selection", test_proxy_residue_rejects_tampered_selection),
+        ("proxy_residue_inline_cleanup_preserves_launcher", test_proxy_residue_inline_cleanup_preserves_launcher),
         ("offline_bundle_layout", test_offline_bundle_layout),
     ]
     for name, func in checks:
